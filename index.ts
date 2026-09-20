@@ -26,8 +26,15 @@ import {
   toolDraft,
   toolPatch,
 } from "./src/engine";
+import { createLogger } from "./src/log";
+import { loadVccRecallTool } from "./src/vcc";
 
-export default function piVccPlus(pi: ExtensionAPI): void {
+/**
+ * Async on purpose: pi awaits async extension factories before session_start,
+ * so tools registered here are part of the tool list from the very first
+ * request — the prefix stays stable.
+ */
+export default async function piVccPlus(pi: ExtensionAPI): Promise<void> {
   ensureConfigFile();
   const cfg = loadConfig();
   if (!cfg.enabled) return;
@@ -70,6 +77,18 @@ export default function piVccPlus(pi: ExtensionAPI): void {
       return toolDone();
     },
   });
+
+  // pi-vcc's own read-only history search tool, registered from their source.
+  if (cfg.upstreamRecallTool) {
+    const log = createLogger("startup", cfg.debugLog);
+    try {
+      const registerRecallTool = await loadVccRecallTool(cfg.vccPackagePath);
+      registerRecallTool(pi);
+      log("upstream_recall_registered", {});
+    } catch (error) {
+      log("upstream_recall_failed", { error: String(error) });
+    }
+  }
 
   // Prefix snapshots (see src/engine.ts).
   pi.on("context", async (event: any, ctx: any) => {

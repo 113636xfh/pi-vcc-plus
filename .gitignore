@@ -1,5 +1,4 @@
-# pi-vcc working copy. It is a placeholder until it becomes a git submodule
-# (scripts/setup-upstream-vcc.ps1 removes this line when it converts it).
+# third_party/pi-vcc is an upstream git submodule (see .gitmodules)
 
 # runtime / build noise
 node_modules/

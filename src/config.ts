@@ -37,6 +37,8 @@ export interface Config {
   onFailure: "auto" | "cancel" | "throw" | "draft";
   /** false = fail closed instead of silently deferring to pi's native summarizer. */
   fallbackToNative: boolean;
+  /** Register pi-vcc's own vcc_recall tool (read-only history search). */
+  upstreamRecallTool: boolean;
   debugLog: boolean;
   systemBlock: string;
 }
@@ -50,6 +52,8 @@ This extension takes over context compaction. The flow is:
    when you need to see the current full draft, and call vcc_done when you are finished.
 3. These three tools are only usable during the compaction check phase; calling them at any
    other time is rejected.
+   Separately, vcc_recall (shipped with pi-vcc) stays available in normal turns whenever you
+   need to look up earlier parts of this session; it is rejected during the check phase.
 4. Your changes are applied to the draft. When compaction completes, the new context is this
    finalized summary plus the last few turns kept verbatim, and the current task continues.
 5. During the check phase, output tool calls only: do not continue the conversation and do not
@@ -69,6 +73,7 @@ export const DEFAULTS: Config = {
   },
   onFailure: "auto",
   fallbackToNative: false,
+  upstreamRecallTool: true,
   debugLog: true,
   systemBlock: SYSTEM_BLOCK,
 };

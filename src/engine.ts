@@ -12,6 +12,7 @@ import { createLogger, type Logger } from "./log";
 import { applyChanges, tokensOf, type Change } from "./patch";
 import {
   ERR_DRAFT_READ_CAP,
+  ERR_RECALL_IN_CHECK,
   ERR_REPEAT_HINT,
   ERR_TOOL_NOT_ALLOWED,
   ERR_TOOL_OUTSIDE_PHASE,
@@ -347,6 +348,7 @@ async function runCheckLoop(args: {
       if (name === "vcc_patch") outcome = toolPatch(call?.arguments ?? {});
       else if (name === "vcc_draft") outcome = toolDraft(call?.arguments ?? {});
       else if (name === "vcc_done") outcome = toolDone();
+      else if (name === "vcc_recall") outcome = text(ERR_RECALL_IN_CHECK, true);
       else outcome = text(ERR_TOOL_NOT_ALLOWED, true);
 
       messages.push({

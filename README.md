@@ -27,11 +27,18 @@ scripts/                 维护脚本
 ## 安装
 
 ```powershell
+# 0) 安装依赖（submodule 里的 recall 工具会 import typebox，从仓库根解析）
+bun install        # 或 npm install
+
 # 1) 安装扩展本身（本地路径不会被复制，改代码后 /reload 即可生效）
 pi install "<repo-dir>"
 
 # 2) 让 pi 能加载 VCC：三条路任选其一（见下）
 ```
+
+> 为什么要 `bun install`：我们直接加载 **上游** `third_party/pi-vcc/src/tools/recall.ts`，
+> 它 `import { Type } from "typebox"`，而 submodule 自己没有 node_modules；
+> 仓库根装上 `typebox@1.3.7`（与 pi 自带版本一致）后，Node 的解析会从 submodule 向上找到它。
 
 `src/vcc.ts` 按以下顺序解析上游 pi-vcc（都用它**发布出来的源码**，我们不改它一行）：
 
@@ -45,23 +52,20 @@ pi install "<repo-dir>"
 > `{ "source": "npm:@sting8k/pi-vcc", "extensions": [] }`
 > 否则它自己的 `session_before_compact` 钩子会和本扩展抢同一次压缩。
 
-## 把 VCC 换成上游 submodule（推荐，便于跟随他们更新）
+## 上游 VCC（git submodule）
 
-当前 `third_party/pi-vcc` 是一份**未修改**的已发布副本（0.8.0），只是为了立刻能跑。
-在有网络的环境里执行：
+`third_party/pi-vcc` 是指向 <https://github.com/sting8k/pi-vcc> 的 submodule，当前固定在 `303e89d`
+（v0.8.0 之后的一个 docs 提交）。加载器直接读它的源码：**我们不复制、不修改上游代码**。
 
-```powershell
-.\scripts\setup-upstream-vcc.ps1
-```
-
-它会删掉本地占位副本、移除 .gitignore 里的忽略行、执行
-`git submodule add https://github.com/sting8k/pi-vcc.git third_party/pi-vcc` 并提交。
-
-之后更新上游：
+更新上游：
 
 ```powershell
 git submodule update --remote --merge third_party/pi-vcc
+git add third_party/pi-vcc
+git commit -m "bump pi-vcc"
 ```
+
+`scripts/setup-upstream-vcc.ps1` 只用于"重做这次切换"（把仓库里的本地副本换成 submodule）。
 
 ## 工作流程
 

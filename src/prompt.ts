@@ -32,7 +32,7 @@ following, so check this conversation for them and add whatever is missing:
 - Measured results and failure facts (measured numbers, error text, failed commands)
 
 - Only vcc_patch / vcc_draft / vcc_done may be called; any other tool (including edit, read,
-  bash) will be rejected
+  bash and vcc_recall) will be rejected during this phase
 - Do not restate the draft, do not continue the conversation, and do not write user-facing
   explanations or filler
 - Section headers (lines such as [Outstanding Context]) must not be deleted or rewritten
@@ -83,6 +83,8 @@ export const ERR_OVER_CAP = (after: number, cap: number): string =>
 export const ERR_TOOL_NOT_ALLOWED =
   "Only vcc_patch / vcc_draft / vcc_done are allowed during the compaction check; other tools (including edit, read, bash) will be rejected.";
 export const ERR_TOOL_OUTSIDE_PHASE = "This tool is only usable during the compaction check phase.";
+export const ERR_RECALL_IN_CHECK =
+  "vcc_recall is for normal turns, not for the compaction check phase. Finish the draft with vcc_patch / vcc_draft / vcc_done.";
 export const ERR_DRAFT_READ_CAP = (max: number): string =>
   `vcc_draft has already been called ${max} times; finish based on the diff receipts and call vcc_done.`;
 export const ERR_REPEAT_HINT =

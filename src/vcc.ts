@@ -42,6 +42,31 @@ export function candidateVccDirs(explicit?: string | null): string[] {
   return [...new Set(dirs)];
 }
 
+/** First candidate directory that actually holds pi-vcc's source. */
+export function resolveVccDir(explicit?: string | null): string | null {
+  for (const dir of candidateVccDirs(explicit)) {
+    if (existsSync(join(dir, "src", "core", "summarize.ts"))) return dir;
+  }
+  return null;
+}
+
+/**
+ * pi-vcc's own vcc_recall tool registration (their code, untouched).
+ * Registers the same tool name/description/schema as the upstream extension.
+ */
+export async function loadVccRecallTool(
+  explicit?: string | null,
+): Promise<(pi: any) => void> {
+  const dir = resolveVccDir(explicit);
+  if (!dir) throw new Error("pi-vcc source directory not found (cannot register vcc_recall)");
+  const recall = await import(pathToFileURL(join(dir, "src", "tools", "recall.ts")).href);
+  const register = (recall as any).registerRecallTool;
+  if (typeof register !== "function") {
+    throw new Error("pi-vcc/src/tools/recall.ts does not export registerRecallTool");
+  }
+  return register;
+}
+
 export async function loadVcc(explicit?: string | null): Promise<VccModule> {
   if (cached && !explicit) return cached;
 
