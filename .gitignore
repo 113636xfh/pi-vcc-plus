@@ -1,0 +1,18 @@
+# pi-vcc working copy. It is a placeholder until it becomes a git submodule
+# (scripts/setup-upstream-vcc.ps1 removes this line when it converts it).
+/third_party/pi-vcc/
+
+# runtime / build noise
+node_modules/
+dist/
+tmp-*/
+*.log
+
+# pi-vcc-plus keeps its own state under ~/.pi/agent/vcc-plus/, never in the repo
+.vcc-plus-local/
+
+# editor / OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
