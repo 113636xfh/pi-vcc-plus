@@ -15,7 +15,7 @@ import { DEFAULTS } from "../src/config";
 import { __internals } from "../src/engine";
 import { type Logger } from "../src/log";
 
-const { buildCheckFetch, verifyCheckPrefix, runCheckLoop, _testSetPhase, _testSetSnapshot } = __internals;
+const { buildCheckFetch, verifyCheckPrefix, readWireBaseline, runCheckLoop, _testSetPhase, _testSetSnapshot } = __internals;
 
 const WIRE_TOOLS = [
   { name: "t1", description: "d1", input_schema: { type: "object" }, cache_control: { type: "ephemeral" } },
@@ -158,6 +158,71 @@ describe("verifyCheckPrefix", () => {
   });
 });
 
+describe("readWireBaseline: freshness and precedence", () => {
+  const scratch = mkdtempSync(join(tmpdir(), "vcc-plus-baseline-"));
+  function write(cwd: string, source: "sentinel" | "self", ts: number, extra?: Record<string, unknown>) {
+    const dir = join(cwd, ".pi", source === "sentinel" ? "prefix-sentinel" : "vcc-plus");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, source === "sentinel" ? "last-request.json" : "last-wire-request.json"),
+      JSON.stringify({ ts, pretty: "{}", ...extra }),
+      "utf8",
+    );
+  }
+
+  test("both stale (older than snapshot) -> null", () => {
+    const cwd = join(scratch, "stale");
+    mkdirSync(cwd, { recursive: true });
+    write(cwd, "sentinel", 100);
+    write(cwd, "self", 150);
+    expect(readWireBaseline(cwd, 200)).toBeNull();
+  });
+
+  test("stale sentinel, fresh self -> self wins", () => {
+    const cwd = join(scratch, "self-fresh");
+    mkdirSync(cwd, { recursive: true });
+    write(cwd, "sentinel", 100);
+    write(cwd, "self", 300);
+    expect(readWireBaseline(cwd, 200)?.source).toBe("self");
+  });
+
+  test("both fresh -> newest wins", () => {
+    const cwd = join(scratch, "newest");
+    mkdirSync(cwd, { recursive: true });
+    write(cwd, "sentinel", 250);
+    write(cwd, "self", 300);
+    expect(readWireBaseline(cwd, 200)?.source).toBe("self");
+  });
+
+  test("tie -> sentinel (independent capture) preferred", () => {
+    const cwd = join(scratch, "tie");
+    mkdirSync(cwd, { recursive: true });
+    write(cwd, "sentinel", 300);
+    write(cwd, "self", 300);
+    expect(readWireBaseline(cwd, 200)?.source).toBe("sentinel");
+  });
+
+  test("missing ts -> treated as stale", () => {
+    const cwd = join(scratch, "nots");
+    mkdirSync(cwd, { recursive: true });
+    const dir = join(cwd, ".pi", "vcc-plus");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "last-wire-request.json"), JSON.stringify({ pretty: "{}" }), "utf8");
+    expect(readWireBaseline(cwd, 1)).toBeNull();
+  });
+
+  test("no sinceTs -> any parseable candidate is accepted", () => {
+    const cwd = join(scratch, "nosince");
+    mkdirSync(cwd, { recursive: true });
+    write(cwd, "sentinel", 100);
+    expect(readWireBaseline(cwd)?.source).toBe("sentinel");
+  });
+
+  afterAll(() => {
+    rmSync(scratch, { recursive: true, force: true });
+  });
+});
+
 describe("runCheckLoop: check-request byte verification (integration)", () => {
   const scratch = mkdtempSync(join(tmpdir(), "vcc-plus-checkfetch-"));
 
@@ -196,6 +261,45 @@ describe("runCheckLoop: check-request byte verification (integration)", () => {
   }
 
   const u1 = { role: "user", content: "u1" };
+
+  function doneResponse() {
+    return {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "c1", name: "vcc_done", arguments: {} }],
+      api: "anthropic-messages",
+      provider: "test",
+      model: "test",
+      usage: { input: 10, output: 5, cacheRead: 10, cacheWrite: 0, totalTokens: 15, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: "toolUse",
+      timestamp: 0,
+    };
+  }
+
+  function freshPhase() {
+    return {
+      active: true,
+      draft: "[Session Goal]\n- g",
+      capTokens: 10_000,
+      charsPerToken: 4,
+      maxDraftReads: 3,
+      guard: { rounds: 0, fails: 0, draftReads: 0, done: false },
+      failedOldTexts: new Map<string, number>(),
+    };
+  }
+
+  function snapWith(overrides: Record<string, unknown> = {}) {
+    return {
+      messages: [u1],
+      systemPrompt: "sys",
+      tools: RECONSTRUCTED_TOOLS.map((t) => ({ ...t, parameters: t.input_schema })),
+      wireTools: WIRE_TOOLS,
+      toolsSource: "test",
+      toolsRoundTrip: "ok",
+      prefixTokens: 10,
+      at: 0,
+      ...overrides,
+    } as any;
+  }
 
   test("identical prefix: checkPrefix identical=true, check-request.json written with wire tools", async () => {
     const cwd = join(scratch, "ok");
@@ -344,16 +448,7 @@ describe("runCheckLoop: check-request byte verification (integration)", () => {
           method: "POST",
           body: JSON.stringify({ model: "m", system: "S", tools: RECONSTRUCTED_TOOLS, messages: [u1] }),
         });
-        return {
-          role: "assistant",
-          content: [{ type: "toolCall", id: "c1", name: "vcc_done", arguments: {} }],
-          api: "anthropic-messages",
-          provider: "test",
-          model: "test",
-          usage: { input: 10, output: 5, cacheRead: 10, cacheWrite: 0, totalTokens: 15, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-          stopReason: "toolUse",
-          timestamp: 0,
-        };
+        return doneResponse();
       }),
       model: { maxTokens: 4096 },
       cfg: structuredClone(DEFAULTS),
@@ -366,7 +461,135 @@ describe("runCheckLoop: check-request byte verification (integration)", () => {
 
     const checkPrefix = entries.find(([n]) => n === "checkPrefix")?.[1];
     expect(checkPrefix!.identical).toBeNull();
-    expect(String(checkPrefix!.reason)).toContain("no wire baseline");
+    expect(String(checkPrefix!.reason)).toContain("no fresh wire baseline");
+    _testSetPhase(null);
+    _testSetSnapshot(null);
+  });
+
+  test("stale self-baseline (ts < snapshot.at) is ignored, not used", async () => {
+    const cwd = join(scratch, "stale-self");
+    mkdirSync(join(cwd, ".pi", "vcc-plus"), { recursive: true });
+    writeFileSync(
+      join(cwd, ".pi", "vcc-plus", "last-wire-request.json"),
+      JSON.stringify({ ts: 500, pretty: JSON.stringify({ model: "m", system: "S", tools: WIRE_TOOLS, messages: [u1] }, null, 2) }),
+      "utf8",
+    );
+    _testSetPhase(freshPhase());
+    _testSetSnapshot(snapWith({ at: 1000 }));
+
+    const { log, entries } = captureLog();
+    await runCheckLoop({
+      ctx: ctxWithCwd(cwd, async (_context, options) => {
+        await (options.fetch as typeof globalThis.fetch)("https://x.test/v1/messages", {
+          method: "POST",
+          body: JSON.stringify({ model: "m", system: "S", tools: RECONSTRUCTED_TOOLS, messages: [u1, { role: "user", content: "TAIL" }] }),
+        });
+        return doneResponse();
+      }),
+      model: { maxTokens: 4096 },
+      cfg: structuredClone(DEFAULTS),
+      signal: undefined,
+      capTokens: 10_000,
+      charsPerToken: 4,
+      reserveTokens: 16384,
+      log,
+    });
+
+    const checkPrefix = entries.find(([n]) => n === "checkPrefix")?.[1];
+    expect(checkPrefix!.identical).toBeNull();
+    expect(String(checkPrefix!.reason)).toContain("no fresh wire baseline");
+    _testSetPhase(null);
+    _testSetSnapshot(null);
+  });
+
+  test("fresh self-baseline (sentinel absent) is used: baselineSource=self", async () => {
+    const cwd = join(scratch, "self-fresh");
+    mkdirSync(join(cwd, ".pi", "vcc-plus"), { recursive: true });
+    writeFileSync(
+      join(cwd, ".pi", "vcc-plus", "last-wire-request.json"),
+      JSON.stringify({ ts: 1000, pretty: JSON.stringify({ model: "m", system: "S", tools: WIRE_TOOLS, messages: [u1] }, null, 2) }),
+      "utf8",
+    );
+    _testSetPhase(freshPhase());
+    _testSetSnapshot(snapWith({ at: 1000 }));
+
+    const { log, entries } = captureLog();
+    await runCheckLoop({
+      ctx: ctxWithCwd(cwd, async (_context, options) => {
+        await (options.fetch as typeof globalThis.fetch)("https://x.test/v1/messages", {
+          method: "POST",
+          body: JSON.stringify({ model: "m", system: "S", tools: RECONSTRUCTED_TOOLS, messages: [u1, { role: "user", content: "TAIL" }] }),
+        });
+        return doneResponse();
+      }),
+      model: { maxTokens: 4096 },
+      cfg: structuredClone(DEFAULTS),
+      signal: undefined,
+      capTokens: 10_000,
+      charsPerToken: 4,
+      reserveTokens: 16384,
+      log,
+    });
+
+    const checkPrefix = entries.find(([n]) => n === "checkPrefix")?.[1];
+    expect(checkPrefix!.identical).toBe(true);
+    expect(checkPrefix!.baselineSource).toBe("self");
+    _testSetPhase(null);
+    _testSetSnapshot(null);
+  });
+
+  test("fetch never called: visible 'not verified' state (fetchCalled=false)", async () => {
+    const cwd = join(scratch, "nofetch");
+    mkdirSync(cwd, { recursive: true });
+    _testSetPhase(freshPhase());
+    _testSetSnapshot(snapWith());
+
+    const { log, entries } = captureLog();
+    await runCheckLoop({
+      ctx: ctxWithCwd(cwd, async () => doneResponse()), // provider ignored options.fetch
+      model: { maxTokens: 4096 },
+      cfg: structuredClone(DEFAULTS),
+      signal: undefined,
+      capTokens: 10_000,
+      charsPerToken: 4,
+      reserveTokens: 16384,
+      log,
+    });
+
+    const checkPrefix = entries.find(([n]) => n === "checkPrefix")?.[1];
+    expect(checkPrefix).toBeDefined();
+    expect(checkPrefix!.identical).toBeNull();
+    expect(checkPrefix!.fetchCalled).toBe(false);
+    expect(String(checkPrefix!.reason)).toContain("never called");
+    _testSetPhase(null);
+    _testSetSnapshot(null);
+  });
+
+  test("fetch called without a JSON body string: visible 'not verified' state", async () => {
+    const cwd = join(scratch, "nobody");
+    mkdirSync(cwd, { recursive: true });
+    _testSetPhase(freshPhase());
+    _testSetSnapshot(snapWith());
+
+    const { log, entries } = captureLog();
+    await runCheckLoop({
+      ctx: ctxWithCwd(cwd, async (_context, options) => {
+        await (options.fetch as typeof globalThis.fetch)("https://x.test/v1/messages", { method: "POST" });
+        return doneResponse();
+      }),
+      model: { maxTokens: 4096 },
+      cfg: structuredClone(DEFAULTS),
+      signal: undefined,
+      capTokens: 10_000,
+      charsPerToken: 4,
+      reserveTokens: 16384,
+      log,
+    });
+
+    const checkPrefix = entries.find(([n]) => n === "checkPrefix")?.[1];
+    expect(checkPrefix!.identical).toBeNull();
+    expect(checkPrefix!.fetchCalled).toBe(true);
+    expect(String(checkPrefix!.reason)).toContain("no JSON body string");
     _testSetPhase(null);
     _testSetSnapshot(null);
   });

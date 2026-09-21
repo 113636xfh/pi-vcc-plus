@@ -238,26 +238,34 @@ export function verifyCheckPrefix(
 }
 
 /**
- * Wire baseline for the check-request verification. The prefix-sentinel's
- * capture is preferred (independent code path); our own capture is the
- * fallback when the sentinel is not installed.
+ * Wire baseline for the check-request verification. Candidates are
+ * freshness-gated (ts >= sinceTs, i.e. this request or later — anything older
+ * is a stale leftover, possibly from another session in the cwd) and the
+ * NEWEST wins; ties go to the sentinel (independent capture).
  */
-export function readWireBaseline(cwd: string | undefined): { pretty: string; source: "sentinel" | "self" } | null {
+export function readWireBaseline(
+  cwd: string | undefined,
+  sinceTs?: number,
+): { pretty: string; source: "sentinel" | "self"; ts: number } | null {
   if (typeof cwd !== "string") return null;
   const candidates: Array<["sentinel" | "self", string]> = [
     ["sentinel", join(cwd, ".pi", "prefix-sentinel", "last-request.json")],
     ["self", join(cwd, ".pi", "vcc-plus", "last-wire-request.json")],
   ];
+  let best: { pretty: string; source: "sentinel" | "self"; ts: number } | null = null;
   for (const [source, path] of candidates) {
     try {
       if (!existsSync(path)) continue;
       const parsed = JSON.parse(readFileSync(path, "utf8")) as Any;
-      if (typeof parsed?.pretty === "string") return { pretty: parsed.pretty, source };
+      if (typeof parsed?.pretty !== "string") continue;
+      const ts = typeof parsed.ts === "number" ? parsed.ts : 0; // missing ts = treat as stale
+      if (typeof sinceTs === "number" && ts < sinceTs) continue; // stale leftover
+      if (!best || ts > best.ts) best = { pretty: parsed.pretty, source, ts }; // ties keep the earlier candidate (sentinel)
     } catch {
       /* try the next candidate */
     }
   }
-  return null;
+  return best;
 }
 
 /**
@@ -596,29 +604,46 @@ async function runCheckLoop(args: {
 
     // Verify the check request's bytes against the last real request (once,
     // on the first round). The body is written next to the sentinel's files
-    // so it can be inspected independently.
-    if (phase!.guard.rounds === 1 && checkCapture.bodyText) {
-      const baseline = readWireBaseline(ctx?.cwd);
-      if (baseline) {
-        try {
-          const verification = verifyCheckPrefix(
-            JSON.parse(baseline.pretty),
-            JSON.parse(checkCapture.bodyText),
-            baseline.source,
-          );
+    // so it can be inspected independently. "Not verified" is a visible state:
+    // this branch ALWAYS logs a checkPrefix line on round 1.
+    if (phase!.guard.rounds === 1) {
+      if (checkCapture.bodyText) {
+        const baseline = readWireBaseline(ctx?.cwd, snapshot?.at);
+        if (baseline) {
           try {
-            const dir = join(ctx?.cwd, ".pi", "prefix-sentinel");
-            mkdirSync(dir, { recursive: true });
-            writeFileSync(join(dir, "check-request.json"), checkCapture.bodyText, "utf8");
-          } catch {
-            /* the log line below still records the result */
+            const verification = verifyCheckPrefix(
+              JSON.parse(baseline.pretty),
+              JSON.parse(checkCapture.bodyText),
+              baseline.source,
+            );
+            try {
+              const dir = join(ctx?.cwd, ".pi", "prefix-sentinel");
+              mkdirSync(dir, { recursive: true });
+              writeFileSync(join(dir, "check-request.json"), checkCapture.bodyText, "utf8");
+            } catch {
+              /* the log line below still records the result */
+            }
+            log("checkPrefix", { ...verification, baselineTs: baseline.ts });
+          } catch (e) {
+            log("checkPrefix", { identical: null, error: String(e) });
           }
-          log("checkPrefix", verification);
-        } catch (e) {
-          log("checkPrefix", { identical: null, error: String(e) });
+        } else {
+          log("checkPrefix", {
+            identical: null,
+            baselineSource: null,
+            reason: "no fresh wire baseline (missing, or older than the snapshot — stale leftover?)",
+          });
         }
       } else {
-        log("checkPrefix", { identical: null, baselineSource: null, reason: "no wire baseline (sentinel not installed and self-capture missing)" });
+        log("checkPrefix", {
+          identical: null,
+          baselineSource: null,
+          fetchCalled: checkCapture.bodyText !== undefined,
+          reason:
+            checkCapture.bodyText === undefined
+              ? "custom fetch was never called (provider ignored options.fetch?)"
+              : "custom fetch was called but no JSON body string was captured",
+        });
       }
     }
 

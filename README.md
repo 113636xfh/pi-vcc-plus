@@ -151,6 +151,8 @@ bun run test/draft-smoke.ts <session.jsonl> 0  # 用真实会话离线生成草�
    所以 prefix-sentinel 看不到它——它由 pi-vcc-plus 自己的 fetch 拦截验证：
    第一次出站 body 与上一次真实请求的 wire body 做前缀比较（system / tools / 前 N 条
    messages），结果写 `checkPrefix` 日志（`identical` + `firstDivergence`），完整 body 写到
-   `.pi/prefix-sentinel/check-request.json`。基线优先取 prefix-sentinel 的 `last-request.json`
-   （独立代码路径捕获），没有哨兵时用自捕获的 `.pi/vcc-plus/last-wire-request.json`。
+   `.pi/prefix-sentinel/check-request.json`。基线要求**新鲜**（`ts ≥ 快照时刻`，
+   取较新者，平手优先哨兵）——旧进程/其它会话的残留基线会被忽略而不是误报。
+   `checkPrefix` 在第 1 轮**必有**一行：验到与否都是可见状态
+   （fetch 没被调用 / 没捕到 body / 无新鲜基线 → `identical: null` + `reason`）。
    双证据：字节层面（本条）+ 框架层面（`round.prefixSuspect` 的 cacheRead 断言）。

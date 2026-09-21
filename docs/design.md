@@ -18,7 +18,7 @@
 | 只用 `vcc_patch` / `vcc_draft` / `vcc_done` | 校验阶段给模型一个封闭的动作空间；`vcc_draft` 仅在 diff 不足以判断时使用 |
 | 上限用 `min(0.8 × reserveTokens, model.maxTokens)` | 与 pi 原生摘要完全相同的预算公式；写进提示词，并由 P4 校验（同一个取值来源） |
 | 护栏只用计数（轮次/失败次数/draft 读取次数） | 慢模型单次调用几十秒很正常，用时间判断会误杀 |
-| 校验请求的字节级复核（B 面，自验证） | 校验请求走 `ModelRegistry.complete` → `runtime.complete`，**不经过** Agent 的 `onPayload`，哨兵看不到它；所以 pi-vcc-plus 自己的 fetch 拦截：tools 原样替换 + 首次出站 body 与上一次真实请求的 wire body 前缀比较（基线优先哨兵 `last-request.json`，否则自捕获 `.pi/vcc-plus/last-wire-request.json`），结果写 `checkPrefix` 日志、完整 body 写 `.pi/prefix-sentinel/check-request.json` |
+| 校验请求的字节级复核（B 面，自验证） | 校验请求走 `ModelRegistry.complete` → `runtime.complete`，**不经过** Agent 的 `onPayload`，哨兵看不到它；所以 pi-vcc-plus 自己的 fetch 拦截：tools 原样替换 + 首次出站 body 与上一次真实请求的 wire body 前缀比较（基线要求 `ts ≥ 快照时刻`、取较新者、平手优先哨兵，旧残留不会误报），结果写 `checkPrefix` 日志、完整 body 写 `.pi/prefix-sentinel/check-request.json`；第 1 轮必有一行 `checkPrefix`，验不到也是可见状态（`identical: null` + `reason`） |
 | 失败 fail-closed（不静默回退原生） | 静默回退会让“前缀复用”这个核心目标失效，而且用户无法察觉 |
 | 提示词全英文 | 与 pi 原生提示词同语言；避免中英混排造成的模板/缓存差异 |
 
