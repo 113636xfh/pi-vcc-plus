@@ -33,7 +33,7 @@ export interface Rejected {
 export const tokensOf = (text: string, charsPerToken: number): number =>
   Math.ceil((text?.length ?? 0) / (charsPerToken || 4));
 
-const SECTION_RE = /^\[[^\]]+\]\s*$/;
+export const SECTION_RE = /^\[[^\]]+\]\s*$/;
 
 export function sectionHeadersIn(text: string): string[] {
   return text
@@ -73,6 +73,10 @@ export function applyChanges(args: {
   const { draft, changes, capTokens, charsPerToken } = args;
   if (!Array.isArray(changes)) return { ok: false, error: "changes must be an array." };
   if (changes.length === 0) {
+    // P4 applies to no-op patches too: an empty patch list must not paper over
+    // a draft that is already over the cap.
+    const tokens = tokensOf(draft, charsPerToken);
+    if (tokens > capTokens) return { ok: false, error: ERR_OVER_CAP(tokens, capTokens) };
     return {
       ok: true,
       text: draft,
@@ -81,7 +85,7 @@ export function applyChanges(args: {
       receipt: buildDiffReceipt({
         added: 0,
         removed: 0,
-        draftTokens: tokensOf(draft, charsPerToken),
+        draftTokens: tokens,
         capTokens,
         sections: [],
       }),

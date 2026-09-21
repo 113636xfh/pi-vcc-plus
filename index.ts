@@ -51,7 +51,7 @@ export default async function piVccPlus(pi: ExtensionAPI): Promise<void> {
         }),
       ),
     }),
-    async execute(_toolCallId: string, params: unknown): Promise<unknown> {
+    async execute(_toolCallId: string, params: unknown) {
       return toolPatch(params);
     },
   });
@@ -63,7 +63,7 @@ export default async function piVccPlus(pi: ExtensionAPI): Promise<void> {
     parameters: Type.Object({
       section: Type.Optional(Type.String({ description: 'e.g. "[Outstanding Context]"' })),
     }),
-    async execute(_toolCallId: string, params: unknown): Promise<unknown> {
+    async execute(_toolCallId: string, params: unknown) {
       return toolDraft(params);
     },
   });
@@ -73,7 +73,7 @@ export default async function piVccPlus(pi: ExtensionAPI): Promise<void> {
     label: "VCC Done",
     description: DESC_VCC_DONE,
     parameters: Type.Object({}),
-    async execute(): Promise<unknown> {
+    async execute() {
       return toolDone();
     },
   });
@@ -99,11 +99,14 @@ export default async function piVccPlus(pi: ExtensionAPI): Promise<void> {
   });
 
   // Constant mechanism block — same string on every run keeps the prefix stable.
+  // cfg is read exactly once at load: a mid-session edit of config.json must
+  // not change the system block (it would break the prefix invariant);
+  // config changes require /reload.
   pi.on("before_agent_start", async (event: any) => {
-    const block = loadConfig().systemBlock;
+    const block = cfg.systemBlock;
     if (!block) return undefined;
     return { systemPrompt: `${event?.systemPrompt ?? ""}\n\n${block}` };
   });
 
-  pi.on("session_before_compact", async (event: any, ctx: any) => onBeforeCompact(pi, event, ctx));
+  pi.on("session_before_compact", async (event: any, ctx: any) => onBeforeCompact(event, ctx, cfg));
 }

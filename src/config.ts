@@ -12,6 +12,13 @@ export interface Guards {
    * a failure. The check phase is bounded by maxRounds instead.
    */
   callTimeoutMs: number;
+  /**
+   * When true, the check loop fails closed unless the model explicitly calls
+   * vcc_done (a text-only "stop" response is no longer accepted as done).
+   * Default false: a text-only response leaves a cap-validated draft, so it
+   * is accepted with a warning.
+   */
+  requireDone: boolean;
 }
 
 export interface DraftBudget {
@@ -70,6 +77,7 @@ export const DEFAULTS: Config = {
     maxConsecutiveFails: 4,
     maxDraftReads: 3,
     callTimeoutMs: 0,
+    requireDone: false,
   },
   onFailure: "auto",
   fallbackToNative: false,

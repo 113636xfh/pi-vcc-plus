@@ -7,9 +7,9 @@
  * compaction summary. No extra summarization request, no prefix change.
  */
 import { convertToLlm } from "@earendil-works/pi-coding-agent";
-import { loadConfig, type Config } from "./config";
+import { type Config } from "./config";
 import { createLogger, type Logger } from "./log";
-import { applyChanges, tokensOf, type Change } from "./patch";
+import { applyChanges, SECTION_RE, tokensOf, type Change } from "./patch";
 import {
   ERR_DRAFT_READ_CAP,
   ERR_RECALL_IN_CHECK,
@@ -20,6 +20,7 @@ import {
   buildTailInstruction,
   draftHeader,
 } from "./prompt";
+import { isBlockImagesEnabled } from "./pi-settings";
 import { loadVcc, type VccModule } from "./vcc";
 
 type Any = any;
@@ -29,6 +30,10 @@ interface Snapshot {
   systemPrompt: string;
   tools?: Any[];
   toolsSource: string;
+  /** "mismatch" = the wire tools contain shapes that cannot be reconstructed
+   * byte-exactly (grammar/custom tools, strict: true, deferred loading, or an
+   * unrecognized shape) — the check request must fail closed. */
+  toolsRoundTrip?: "ok" | "mismatch";
   prefixTokens: number;
   at: number;
 }
@@ -52,30 +57,49 @@ let phase: Phase | null = null;
 
 export function recordContext(agentMessages: Any[], ctx: Any): void {
   try {
-    const messages = convertToLlm((agentMessages ?? []) as Any) as Any[];
-    const { tools, source } = resolveTools(ctx);
+    // Mirror pi's own wire transform: when images.blockImages is enabled, pi
+    // replaces image parts with a placeholder text on every request, so the
+    // snapshot must apply the same transform or the prefix diverges.
+    const converted = convertToLlm((agentMessages ?? []) as Any) as Any[];
+    const messages = isBlockImagesEnabled(ctx?.cwd) ? blockImageMessages(converted) : converted;
+    // Tools are NOT resolvable from the event ctx (it exposes neither
+    // getAllTools nor getSystemPromptOptions), and the registry order is not
+    // the wire order — the only byte-exact source is the last provider
+    // request's own payload, which recordPayload() fills in.
+    const systemPrompt = safeSystemPrompt(ctx);
     snapshot = {
       messages,
-      systemPrompt: safeSystemPrompt(ctx),
-      tools,
-      toolsSource: source,
-      prefixTokens:
-        Math.ceil(roughChars(messages) / 4) + Math.ceil((safeSystemPrompt(ctx)?.length ?? 0) / 4),
+      systemPrompt,
+      tools: undefined,
+      toolsSource: "none",
+      prefixTokens: Math.ceil(roughChars(messages) / 4) + Math.ceil((systemPrompt?.length ?? 0) / 4),
       at: Date.now(),
     };
   } catch {
-    // A failed snapshot just means the next compaction fails closed.
+    // A snapshot we cannot build is worse than none: a stale one would
+    // silently break the prefix invariant. Nulling makes the next compaction
+    // fail closed (see the no-snapshot guard in onBeforeCompact).
+    snapshot = null;
   }
 }
 
+/**
+ * Primary source of the snapshot's tools: the last provider request's own
+ * wire tool list (byte-exact, in wire order). The event ctx cannot provide
+ * tools (see recordContext), so every snapshot is completed this way.
+ * Refreshed on every payload: the payload belongs to the request the current
+ * snapshot was made for, so re-adopting it also heals a snapshot left stale
+ * by a failed recordContext.
+ */
 export function recordPayload(payload: Any, ctx: Any): void {
   if (!snapshot) return;
-  if (snapshot.tools?.length) return;
+  const wireTools = payload?.tools;
   const tools = toolsFromPayload(payload);
   if (tools?.length) {
     snapshot.tools = tools;
     snapshot.toolsSource = "before_provider_request.payload";
   }
+  snapshot.toolsRoundTrip = toolsRoundTripStatus(wireTools);
 }
 
 function safeSystemPrompt(ctx: Any): string {
@@ -86,33 +110,91 @@ function safeSystemPrompt(ctx: Any): string {
   }
 }
 
-function resolveTools(ctx: Any): { tools?: Any[]; source: string } {
-  try {
-    const options = ctx?.getSystemPromptOptions?.();
-    const selected = options?.selectedTools;
-    if (Array.isArray(selected) && selected.length) {
-      const inline = selected.filter((t: Any) => t && typeof t === "object" && t.name && t.parameters);
-      if (inline.length === selected.length) return { tools: inline, source: "selectedTools" };
-      const names = new Set(selected.filter((t: Any) => typeof t === "string"));
-      const all = (ctx?.getAllTools?.() ?? []).filter((t: Any) => t?.name);
-      const picked = all.filter((t: Any) => names.has(t.name));
-      if (picked.length) return { tools: picked, source: "getAllTools∩selectedTools" };
-    }
-    const all = (ctx?.getAllTools?.() ?? []).filter((t: Any) => t?.name);
-    if (all.length) return { tools: all, source: "getAllTools" };
-  } catch {
-    // fall through
-  }
-  return { source: "none" };
-}
-
+/**
+ * Normalize the provider-specific wire tools back to pi-ai's Tool shape
+ * ({name, description, parameters}) so re-serialization through pi-ai
+ * reproduces the original wire bytes:
+ *  - OpenAI-style:    { type: "function", function: { name, description, parameters } }
+ *  - Anthropic-style: { name, description, input_schema } — the wire
+ *    input_schema is exactly what pi-ai regenerates from `parameters`, so
+ *    mapping it back round-trips byte-stably.
+ * Provider-only fields (cache_control, defer_loading, eager_input_streaming,
+ * strict) are dropped: pi-ai re-derives them from the same settings.
+ */
 function toolsFromPayload(payload: Any): Any[] | undefined {
   const tools = payload?.tools;
   if (!Array.isArray(tools)) return undefined;
   const defs = tools
-    .map((t: Any) => (t?.function ? { name: t.function.name, description: t.function.description, parameters: t.function.parameters } : t))
-    .filter((t: Any) => t?.name);
+    .map((t: Any) => {
+      if (!t || typeof t !== "object") return undefined;
+      if (t.function && typeof t.function === "object" && typeof t.function.name === "string") {
+        const f = t.function;
+        return { name: f.name, description: f.description, parameters: f.parameters };
+      }
+      if (typeof t.name === "string" && t.input_schema) {
+        return { name: t.name, description: t.description, parameters: t.input_schema };
+      }
+      if (typeof t.name === "string" && t.parameters) {
+        return { name: t.name, description: t.description, parameters: t.parameters };
+      }
+      return undefined;
+    })
+    .filter((t: Any): t is { name: string; description?: string; parameters?: unknown } => !!t?.name);
   return defs.length ? defs : undefined;
+}
+
+/**
+ * The {name, description, parameters} reconstruction is byte-stable only for
+ * plain JSON-schema tools. These wire shapes carry information the wire does
+ * not return (constrainedSampling / deferred tool loading), so any of them
+ * means the check request's tools would silently differ from the original:
+ *  - type: "custom" (grammar tools) — not reconstructable at all
+ *  - strict: true — came from constrainedSampling, lost in the wire
+ *  - defer_loading — provider-managed deferred tool loading
+ *  - unrecognized shape — no function.parameters / input_schema / parameters
+ */
+export function toolsRoundTripStatus(wireTools: Any): "ok" | "mismatch" | undefined {
+  if (!Array.isArray(wireTools)) return undefined;
+  for (const t of wireTools) {
+    if (!t || typeof t !== "object") return "mismatch";
+    if (t.type === "custom" || t.custom) return "mismatch";
+    if (t.strict === true || t.function?.strict === true) return "mismatch";
+    if (t.defer_loading === true || t.function?.defer_loading === true) return "mismatch";
+    const hasOpenAiFunction = !!t.function && typeof t.function.name === "string";
+    const hasAnthropicSchema = typeof t.name === "string" && !!t.input_schema;
+    const hasPlainSchema = typeof t.name === "string" && !!t.parameters;
+    if (!hasOpenAiFunction && !hasAnthropicSchema && !hasPlainSchema) return "mismatch";
+  }
+  return "ok";
+}
+
+const BLOCKED_IMAGE_TEXT = "Image reading is disabled.";
+
+/**
+ * pi's own `convertToLlmWithBlockImages` transform (sdk.js): when
+ * images.blockImages is enabled, image parts in user/toolResult messages are
+ * replaced with a placeholder text (deduplicated) before every request.
+ * The snapshot must apply the identical transform to stay byte-identical.
+ */
+export function blockImageMessages(messages: Any[]): Any[] {
+  return messages.map((msg: Any) => {
+    if (msg?.role !== "user" && msg?.role !== "toolResult") return msg;
+    const content = msg?.content;
+    if (!Array.isArray(content) || !content.some((c: Any) => c?.type === "image")) return msg;
+    const filtered = content
+      .map((c: Any) => (c?.type === "image" ? { type: "text", text: BLOCKED_IMAGE_TEXT } : c))
+      .filter(
+        (c: Any, i: number, arr: Any[]) =>
+          !(
+            c?.type === "text" &&
+            c.text === BLOCKED_IMAGE_TEXT &&
+            i > 0 &&
+            arr[i - 1]?.type === "text" &&
+            arr[i - 1]?.text === BLOCKED_IMAGE_TEXT
+          ),
+      );
+    return { ...msg, content: filtered };
+  });
 }
 
 function estimateChars(messages: Any[], vcc: VccModule): number {
@@ -142,7 +224,11 @@ function compileDraft(
 ): { draft: string; charsPerToken: number; spanMessages: number } {
   const spanMessages = [...(prep?.messagesToSummarize ?? []), ...(prep?.turnPrefixMessages ?? [])];
   const llm = convertToLlm(spanMessages as Any) as Any[];
-  const chars = estimateChars(llm, vcc);
+  // Mirror upstream before-compact.ts: the calibration numerator includes the
+  // previous summary's chars (it is part of the context tokens) as well as
+  // the span's own chars.
+  const chars =
+    estimateChars(llm, vcc) + (typeof prep?.previousSummary === "string" ? prep.previousSummary.length : 0);
   const calibration = vcc.calibrateCharsPerToken(chars, prep?.tokensBefore);
   const charsPerToken = calibration.charsPerToken || 4;
   const { floorTokens, ceilingTokens, tokensPerBlock } = cfg.draftBudget;
@@ -163,7 +249,7 @@ function compileDraft(
     vccVersion: vcc.version,
     vccPath: vcc.packageDir,
     spanMessages: spanMessages.length,
-    spanChars: chars,
+    calibrationChars: chars,
     charsPerToken,
     calibrated: calibration.mode,
     draftChars: draft.length,
@@ -178,11 +264,16 @@ function compileDraft(
 
 export interface ToolOutcome {
   content: Array<{ type: "text"; text: string }>;
+  /** AgentToolResult requires `details`; we carry none. */
+  details: undefined;
+  /** Internal flag used when building the check-loop toolResult messages. */
   isError?: boolean;
 }
 
 const text = (value: string, isError = false): ToolOutcome =>
-  isError ? { content: [{ type: "text", text: value }], isError: true } : { content: [{ type: "text", text: value }] };
+  isError
+    ? { content: [{ type: "text", text: value }], details: undefined, isError: true }
+    : { content: [{ type: "text", text: value }], details: undefined };
 
 export function toolPatch(params: Any): ToolOutcome {
   if (!phase?.active) return text(ERR_TOOL_OUTSIDE_PHASE, true);
@@ -276,9 +367,10 @@ async function runCheckLoop(args: {
   capTokens: number;
   charsPerToken: number;
   reserveTokens: number;
+  customInstructions?: string;
   log: Logger;
 }): Promise<{ summary: string; usage: Usage; rounds: number }> {
-  const { ctx, model, cfg, signal, capTokens, charsPerToken, reserveTokens, log } = args;
+  const { ctx, model, cfg, signal, capTokens, charsPerToken, reserveTokens, customInstructions, log } = args;
   const usage = emptyUsage();
   const draftTokens = tokensOf(phase!.draft, charsPerToken);
   const instruction = buildTailInstruction({
@@ -287,6 +379,7 @@ async function runCheckLoop(args: {
     reserveTokens,
     modelMaxTokens: model?.maxTokens ?? 0,
     draftTokens,
+    customInstructions,
   });
 
   const messages: Any[] = [
@@ -295,7 +388,21 @@ async function runCheckLoop(args: {
   ];
 
   const tools = snapshot?.tools;
-  let lastResponse: Any = null;
+  // Fail closed: without the last request's tools the check request cannot
+  // reuse the prefix and the model would not even see the vcc_* tools.
+  if (!tools?.length) {
+    throw new Error(
+      "vcc-plus: no tool definitions in the last-request snapshot; the check request could not reuse the prefix",
+    );
+  }
+  // Fail closed: the wire tools contained a shape that cannot be
+  // reconstructed byte-exactly (grammar/custom, strict: true, deferred
+  // loading, unknown) — a degraded check request would break the prefix.
+  if (snapshot?.toolsRoundTrip === "mismatch") {
+    throw new Error(
+      "vcc-plus: last request's wire tools are not byte-reconstructable (strict/grammar/deferred or unknown shape); refusing a degraded check request",
+    );
+  }
 
   while (phase!.guard.rounds < cfg.guards.maxRounds) {
     if (signal?.aborted) throw new Error("vcc-plus: aborted by the user");
@@ -320,8 +427,28 @@ async function runCheckLoop(args: {
       signal?.removeEventListener?.("abort", onAbort);
     }
 
+    // Fail closed on non-successful responses. pi-ai RESOLVES (does not
+    // reject) with the AssistantMessage itself on API errors and aborts —
+    // stopReason "error" | "aborted" plus errorMessage — so these must be
+    // checked here; otherwise a failed round would look like "no tool calls"
+    // and the uncorrected draft would be finalized silently.
+    // "length" = output truncated mid tool-call batch (partial arguments are
+    // unsafe to apply); "deferred" = no content available to inspect.
+    if (
+      signal?.aborted ||
+      response?.stopReason === "error" ||
+      response?.stopReason === "aborted" ||
+      response?.stopReason === "length" ||
+      response?.stopReason === "deferred" ||
+      response?.errorMessage
+    ) {
+      const detail = response?.errorMessage ? `: ${String(response.errorMessage).slice(0, 300)}` : "";
+      throw new Error(
+        `vcc-plus: check request did not succeed (stopReason=${response?.stopReason ?? "unknown"}${detail})`,
+      );
+    }
+
     phase!.guard.rounds += 1;
-    lastResponse = response;
     addUsage(usage, response?.usage);
 
     const prefixTokens = snapshot?.prefixTokens ?? 0;
@@ -335,6 +462,7 @@ async function runCheckLoop(args: {
       expectedPrefixTokens: prefixTokens,
       prefixSuspect: cacheSuspect,
       toolsSource: snapshot?.toolsSource,
+      toolsRoundTrip: snapshot?.toolsRoundTrip,
       toolsCount: snapshot?.tools?.length ?? 0,
     });
 
@@ -369,7 +497,16 @@ async function runCheckLoop(args: {
   }
 
   if (!phase!.guard.done) {
-    log("loop_end_without_done", { rounds: phase!.guard.rounds });
+    log("loop_end_without_done", { rounds: phase!.guard.rounds, requireDone: cfg.guards.requireDone });
+    // A text-only "stop" response leaves a cap-validated draft (only
+    // successful, P4-checked patches modified it), so the default is to
+    // accept it with a warning. requireDone escalates this to a hard failure.
+    if (ctx?.hasUI) {
+      ctx.ui.notify("vcc-plus: the model stopped without vcc_done; using the current draft", "warning");
+    }
+    if (cfg.guards.requireDone) {
+      throw new Error("vcc-plus: the model never called vcc_done (guards.requireDone)");
+    }
   }
   return { summary: phase!.draft, usage, rounds: phase!.guard.rounds };
 }
@@ -378,8 +515,7 @@ async function runCheckLoop(args: {
 // session_before_compact
 // ────────────────────────────────────────────────────────────────────────────
 
-export async function onBeforeCompact(pi: Any, event: Any, ctx: Any): Promise<Any> {
-  const cfg = loadConfig();
+export async function onBeforeCompact(event: Any, ctx: Any, cfg: Config): Promise<Any> {
   if (!cfg.enabled) return undefined;
 
   const prep = event?.preparation;
@@ -432,7 +568,18 @@ export async function onBeforeCompact(pi: Any, event: Any, ctx: Any): Promise<An
   }
 
   if (!snapshot?.messages?.length) {
-    log("warn", { why: "no snapshot; check request would not reuse the prefix" });
+    // Without the last-request snapshot the check request cannot reuse the
+    // prefix at all (no system prompt, no tools) — fail closed instead of
+    // sending a one-message request that silently abandons the design.
+    log("abort", { why: "no snapshot of the last provider request yet" });
+    return fail(
+      cfg,
+      ctx,
+      log,
+      reason,
+      "no snapshot of the last provider request yet; compaction cannot reuse the prefix",
+      prep,
+    );
   }
 
   phase = {
@@ -460,6 +607,7 @@ export async function onBeforeCompact(pi: Any, event: Any, ctx: Any): Promise<An
       capTokens,
       charsPerToken,
       reserveTokens,
+      customInstructions: typeof event?.customInstructions === "string" ? event.customInstructions : undefined,
       log,
     });
     log("summary_final", {
@@ -513,9 +661,11 @@ function fail(cfg: Config, ctx: Any, log: Logger, reason: string, message: strin
   }
   const manual = reason === "manual";
   const mode = cfg.onFailure === "auto" ? (manual ? "throw" : "cancel") : cfg.onFailure;
+  // Inner errors already carry the "vcc-plus:" prefix — don't double it.
+  const bare = message.replace(/^vcc-plus:\s*/, "");
   if (mode === "throw") {
-    log("fail_closed", { mode, message });
-    throw new Error(`vcc-plus: ${message}`);
+    log("fail_closed", { mode, message: bare });
+    throw new Error(`vcc-plus: ${bare}`);
   }
   log("fail_closed", { mode: "cancel", message });
   if (ctx?.hasUI) ctx.ui.notify(`vcc-plus: compaction check failed; this compaction was cancelled (${message})`, "warning");
@@ -530,4 +680,24 @@ function safeSessionId(ctx: Any): string | undefined {
   }
 }
 
-export const __internals = { applyChanges, tokensOf, compileDraft, resolveTools, toolsFromPayload };
+/**
+ * Test-only hooks — never called by pi at runtime (kept for the unit tests
+ * that drive runCheckLoop / fail with controlled inputs).
+ */
+export const __internals = {
+  applyChanges,
+  tokensOf,
+  compileDraft,
+  toolsFromPayload,
+  toolsRoundTripStatus,
+  blockImageMessages,
+  extractSection,
+  runCheckLoop,
+  fail,
+  _testSetPhase: (p: Phase | null) => {
+    phase = p;
+  },
+  _testSetSnapshot: (s: Snapshot | null) => {
+    snapshot = s;
+  },
+};

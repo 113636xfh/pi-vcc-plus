@@ -40,7 +40,11 @@ const span = entries
   .filter((e) => e.type === "message" && e.message)
   .map((e) => e.message);
 
-const chars = span.reduce((sum, message) => sum + vcc.estimateMessageContentChars(message?.content), 0);
+// Mirror upstream before-compact.ts: numerator = span chars + previous summary chars.
+const prevSummary = prev !== undefined ? (entries[prev]?.summary ?? "") : "";
+const chars =
+  span.reduce((sum, message) => sum + vcc.estimateMessageContentChars(message?.content), 0) +
+  prevSummary.length;
 const calibration = vcc.calibrateCharsPerToken(chars, record.tokensBefore);
 const charsPerToken = calibration.charsPerToken || 4;
 

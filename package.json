@@ -3,18 +3,29 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "VCC draft + in-band model check compaction for pi (prefix-stable, no extra summarization request).",
+  "description": "VCC draft + in-band model patch compaction for pi (prefix-stable, no extra summarization request).",
   "pi": {
     "extensions": [
       "./index.ts"
     ]
   },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "bun test test/"
+  },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"
   },
   "dependencies": {
     "typebox": "1.3.7"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.85.1",
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@types/bun": "^1.3.9",
+    "@types/node": "^26.0.0",
+    "typescript": "^5.8.3"
   }
 }

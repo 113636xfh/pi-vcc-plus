@@ -6,8 +6,10 @@ export function buildTailInstruction(args: {
   reserveTokens: number;
   modelMaxTokens: number;
   draftTokens: number;
+  /** Focus instructions from a manual `/compact <instructions>` (manual path only). */
+  customInstructions?: string;
 }): string {
-  const { draft, capTokens, reserveTokens, modelMaxTokens, draftTokens } = args;
+  const { draft, capTokens, reserveTokens, modelMaxTokens, draftTokens, customInstructions } = args;
   return `The block below is the mechanical compaction draft for this window. The draft plus your patches
 becomes the summary at the start of the next context window; the last few turns of this
 conversation are kept verbatim, and everything else will no longer be present afterwards.
@@ -19,6 +21,7 @@ ${draft}
 [Budget] The final summary must be <= ${capTokens} tokens
          (= min(0.8 x reserveTokens=${reserveTokens}, model.maxTokens=${modelMaxTokens}));
          the draft is currently ~${draftTokens} tokens.
+${customInstructions ? `\n[User instructions for this summary] ${customInstructions}` : ""}
 
 [How to edit] Submit additions, deletions and replacements with vcc_patch; call vcc_done when finished.
 

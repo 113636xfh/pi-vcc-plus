@@ -28,7 +28,7 @@ scripts/                 维护脚本
 
 ```powershell
 # 0) 安装依赖（submodule 里的 recall 工具会 import typebox，从仓库根解析）
-bun install        # 或 npm install
+npm install        # lockfile 已提交；bun install 亦可（测试用 bun 跑）
 
 # 1) 安装扩展本身（本地路径不会被复制，改代码后 /reload 即可生效）
 pi install "<repo-dir>"
@@ -91,24 +91,35 @@ git commit -m "bump pi-vcc"
   "vccPackagePath": null,
   "checkModel": null,
   "draftBudget": { "floorTokens": 1100, "ceilingTokens": 2000, "tokensPerBlock": 15 },
-  "guards": { "maxRounds": 8, "maxConsecutiveFails": 4, "maxDraftReads": 3, "callTimeoutMs": 0 },
+  "guards": { "maxRounds": 8, "maxConsecutiveFails": 4, "maxDraftReads": 3, "callTimeoutMs": 0, "requireDone": false },
   "onFailure": "auto",
   "fallbackToNative": false,
+  "upstreamRecallTool": true,
   "debugLog": true,
   "systemBlock": "<pi-vcc-plus>…</pi-vcc-plus>"
 }
 ```
 
-- `guards` 全部是**计数**：慢模型不会被时间掐断（`callTimeoutMs` 默认 0 = 不限）。
+- `guards` 全部是**计数**：慢模型不会被时间掐断（`callTimeoutMs` 默认 0 = 不限）；
+  `requireDone: true` 时模型必须显式 `vcc_done`（纯文本收尾升级为失败，默认只警告）。
 - `onFailure`：`auto`（手动抛错 / 自动 cancel+通知）、`cancel`、`throw`、`draft`（显式回退未校验草稿）。
 - `fallbackToNative: false` = 失败时不静默退回 pi 原生摘要。
+- `upstreamRecallTool: true` = 注册上游 pi-vcc 自带的只读 `vcc_recall`（校验阶段内被拒绝）。
+- 配置只在扩展加载时读一次；改 `config.json` 需 `/reload`（中途改会改变系统块、破坏前缀不变量）。
+- 草稿的 chars/token 校准沿用上游 `before-compact.ts` 的锚（span 字符 + 上次摘要字符 ÷ `tokensBefore`）：
+  这是上游算法的行为（对估算偏保守），我们刻意保持一致、不单方分叉；如需精确控制可用 `checkModel` 换模型或向上游提 issue。
 
 ## 测试
 
 ```powershell
-bun test test/patch.test.ts                    # P1–P4 单测（10 例）
+bun run typecheck                            # tsc --noEmit（strict；捕获运行时才会暴露的类型错误）
+bun test test/                              # P1–P4 单测 + 校验循环回归 + recall 加载
 bun run test/draft-smoke.ts <session.jsonl> 0  # 用真实会话离线生成草稿（不调模型）
 ```
+
+> `bun run typecheck` 需要 devDependencies（`typescript`、`@earendil-works/pi-coding-agent@0.85.1` 等，
+> 与运行中的 pi 同版本）：`bun install` 或 `npm install` 装一次即可。
+> 仓库路径含 `&`，Windows 下 `.bin` shim 会解析失败——直接 `node node_modules/typescript/bin/tsc -p tsconfig.json`。
 
 ## 日志与验收
 
@@ -118,9 +129,19 @@ bun run test/draft-smoke.ts <session.jsonl> 0  # 用真实会话离线生成草�
 **首次实测要看的一条**：`round.prefixSuspect` 必须为 false（即 `cacheRead ≈ 前缀长度`），
 否则说明前文被改动了，前缀复用没有成立。
 
-## 待验证清单
+## 已对 pi 0.85.1 源码核实的前缀等价性
 
-1. 快照是否与 pi 上一次请求逐字节等价（`ctx.getSystemPrompt()` + `convertToLlm(event.messages)` + tools 解析链）。
-2. `ctx.modelRegistry.complete` 传 `tools` 的行为（官方示例没传）。
-3. `toolsSource` 是否稳定命中 `selectedTools`；为 `none` 时前缀可能不一致。
-4. 未集成 `vcc_recall`（按设计：补充只看本窗口）。
+1. **messages**：`context` 事件在每次 provider 请求前触发，`convertToLlm(event.messages)` 与 pi 自己
+   的转换同函数；`images.blockImages` 开启时快照做了与 pi `convertToLlmWithBlockImages` 完全相同的替换。
+2. **system prompt**：`before_agent_start` 在首个请求前就把扩展块并入 `agent.state.systemPrompt`，
+   快照读到的与请求实际用的同值；块本身是常量，每轮不变。
+3. **tools**：事件 ctx 不暴露 `getAllTools` / `getSystemPromptOptions`，所以 tools 只从
+   `before_provider_request` 的 payload 取（上一次请求自己的 wire tools，含顺序）；
+   Anthropic 的 `input_schema → parameters` 映射是字节稳定的 round-trip。
+   字节稳定性由 `toolsRoundTripStatus` 运行时验证：wire tools 含 grammar/custom 形状、
+   `strict: true`（来自 wire 不携带的 `constrainedSampling`，无法重建）或 `defer_loading`
+   时标记 `toolsRoundTrip: mismatch`，检查 fail-closed，不静默降级。
+   `toolsSource` 因此恒为 `before_provider_request.payload`；拿不到 tools 时 fail-closed（不再发降级请求）。
+4. **单轮失败**：pi-ai 对 API 错误/中止是 resolve 返回 `stopReason: "error" | "aborted"` 的
+   AssistantMessage（不 reject）——校验循环现在检查 `stopReason`/`errorMessage`/abort，
+   失败即走 fail-closed，绝不把未校验草稿当定稿。

@@ -13,6 +13,7 @@
 |---|---|
 | 用 `session_before_compact` 接管，而不是新造触发 | pi 的触发点天然位于"工具批次结束 / 下一次 assistant 请求之前"，正是安全截断点；手动 `/compact` 沿用 pi 自己的 abort |
 | 指令只加在**尾部**，system/tools 不动 | 原生的摘要请求换 system prompt + 重排正文 + 去掉 tools，token 0 就变了 → 必然 miss |
+| tools 只从 `before_provider_request` 的 payload 取 | 事件 ctx 不暴露 `getAllTools` / `getSystemPromptOptions`，registry 顺序 ≠ 线上顺序；payload 是上一次请求自己的 wire tools，唯一逐字节等价来源。Anthropic 的 `input_schema` 映射回 `parameters`（pi-ai 正是用它重新生成 wire `input_schema`，round-trip 稳定）；`toolsRoundTripStatus` 运行时再验 wire tools 不含不可重建形状（grammar/custom、`strict: true`、`defer_loading`、未知形状），含则检查 fail-closed |
 | 检查用"打补丁"而不是"重写摘要" | 模型无法破坏 VCC 的结构；失败可定位到行；`oldText` 唯一匹配的语义与原生 edit 一致，模型最熟练 |
 | 只用 `vcc_patch` / `vcc_draft` / `vcc_done` | 校验阶段给模型一个封闭的动作空间；`vcc_draft` 仅在 diff 不足以判断时使用 |
 | 上限用 `min(0.8 × reserveTokens, model.maxTokens)` | 与 pi 原生摘要完全相同的预算公式；写进提示词，并由 P4 校验（同一个取值来源） |
@@ -44,10 +45,27 @@ VCC 的 brief 强于文件/命令/最近对话，最容易丢约束、决策理�
 护栏：轮次 ≤ 8、连续失败 ≤ 4、`vcc_draft` ≤ 3、同一 `oldText` 连续失败 2 次给提示；
 用户中断立即停止；`callTimeoutMs > 0` 时才启用单轮超时（默认 0）。
 
+fail-closed 的边界（全部在 `src/engine.ts`）：
+
+| 触发 | 行为 |
+|---|---|
+| 单轮响应 `stopReason` 为 `error` / `aborted` / `length` / `deferred`，或带 `errorMessage` | 抛错走失败策略——pi-ai 对 API 错误/中止是 **resolve** 返回该 AssistantMessage（不 reject），不检查就会把未校验草稿当定稿 |
+| 快照里没有 tools（payload 拿不到） | 抛错——没有 tools 的检查请求既无法复用前缀，模型也看不到 `vcc_*` |
+| 快照 `toolsRoundTrip` 为 `mismatch`（wire tools 含 grammar/custom 形状、`strict: true`、`defer_loading` 或未知形状） | 抛错——这些形状来自 wire 不携带的 `constrainedSampling`/延迟加载状态，无法逐字节重建，宁可失败也不用降级 tools 破坏前缀 |
+| `recordContext` 构建快照失败 | 快照置 null，下个 compaction 走失败策略——旧快照会静默破坏前缀不变量 |
+| 还没有任何快照（会话首个请求前就压缩） | 走失败策略——单条消息请求没有 system/tools，前缀复用直接作废 |
+| 模型全程没调 `vcc_done` | 默认：警告 + 接受当前草稿（只被 P4 校验过的补丁改过，状态安全）；`guards.requireDone: true` 时升级为失败 |
+| 空 `changes` 补丁 | 同样过 P4 上限检查（不放过已超限的草稿） |
+
+手动 `/compact <instructions>` 的 `customInstructions` 会拼进尾部指令（只影响前缀之后的内容，不影响缓存）。
+
 ## 目录与职责
 
 - `index.ts`：注册系统块、三个工具、`context` / `before_provider_request` 快照钩子、压缩接管。
+  配置只在加载时读一次（改 `config.json` 需 `/reload`）——中途变更会改变系统块、破坏前缀不变量。
 - `src/vcc.ts`：解析并加载**上游** pi-vcc（仓库内 submodule → 显式路径 → 环境变量 → npm 安装位置），
   并记录加载到的版本与路径到日志（`vcc_loaded`）。我们从不修改它。
 - `src/engine.ts`：快照、草稿、校验循环、失败策略。
 - `src/patch.ts`：P1–P4 与 diff 回执渲染（无 pi 依赖，可单测）。
+- `src/pi-settings.ts`：读 pi 自己的设置（`images.blockImages`，项目 `.pi/settings.json` 覆盖全局），
+  让快照与 pi 的 `convertToLlmWithBlockImages` 逐字节一致。
