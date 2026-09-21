@@ -124,7 +124,8 @@ bun run test/draft-smoke.ts <session.jsonl> 0  # 用真实会话离线生成草�
 ## 日志与验收
 
 `~/.pi/agent/vcc-plus/log/<sessionId>.jsonl`：`vcc_loaded`、`draft`、`round`（含 `cacheRead`、
-`expectedPrefixTokens`、`prefixSuspect`、`toolsSource`）、`tool`、`summary_final`、`fail_closed`。
+`expectedPrefixTokens`、`prefixSuspect`、`toolsSource`）、`checkPrefix`（校验请求字节验证结果）、
+`tool`、`summary_final`、`fail_closed`。
 
 **首次实测要看的一条**：`round.prefixSuspect` 必须为 false（即 `cacheRead ≈ 前缀长度`），
 否则说明前文被改动了，前缀复用没有成立。
@@ -136,12 +137,20 @@ bun run test/draft-smoke.ts <session.jsonl> 0  # 用真实会话离线生成草�
 2. **system prompt**：`before_agent_start` 在首个请求前就把扩展块并入 `agent.state.systemPrompt`，
    快照读到的与请求实际用的同值；块本身是常量，每轮不变。
 3. **tools**：事件 ctx 不暴露 `getAllTools` / `getSystemPromptOptions`，所以 tools 只从
-   `before_provider_request` 的 payload 取（上一次请求自己的 wire tools，含顺序）；
-   Anthropic 的 `input_schema → parameters` 映射是字节稳定的 round-trip。
-   字节稳定性由 `toolsRoundTripStatus` 运行时验证：wire tools 含 grammar/custom 形状、
-   `strict: true`（来自 wire 不携带的 `constrainedSampling`，无法重建）或 `defer_loading`
-   时标记 `toolsRoundTrip: mismatch`，检查 fail-closed，不静默降级。
+   `before_provider_request` 的 payload 取（上一次请求自己的 wire tools，含顺序）。
+   校验请求经**自定义 fetch** 发出：出站 body 里的 `tools` 被替换为捕获到的**原始 wire tools**
+   （构造性字节一致，pi-ai 自己的重建永远不上 wire；这也顺带消除了 round-trip 隐患）。
+   `toolsRoundTripStatus` 保留为三保险：wire tools 含 grammar/custom 形状、`strict: true`
+   （来自 wire 不携带的 `constrainedSampling`）或 `defer_loading` 时标记 `mismatch`，检查 fail-closed。
    `toolsSource` 因此恒为 `before_provider_request.payload`；拿不到 tools 时 fail-closed（不再发降级请求）。
 4. **单轮失败**：pi-ai 对 API 错误/中止是 resolve 返回 `stopReason: "error" | "aborted"` 的
    AssistantMessage（不 reject）——校验循环现在检查 `stopReason`/`errorMessage`/abort，
    失败即走 fail-closed，绝不把未校验草稿当定稿。
+5. **校验请求的字节级复核（B 面）**：校验请求不走 Agent 的 stream 路径
+   （`ModelRegistry.complete` → `runtime.complete`，不经过 `onPayload`/`before_provider_request`），
+   所以 prefix-sentinel 看不到它——它由 pi-vcc-plus 自己的 fetch 拦截验证：
+   第一次出站 body 与上一次真实请求的 wire body 做前缀比较（system / tools / 前 N 条
+   messages），结果写 `checkPrefix` 日志（`identical` + `firstDivergence`），完整 body 写到
+   `.pi/prefix-sentinel/check-request.json`。基线优先取 prefix-sentinel 的 `last-request.json`
+   （独立代码路径捕获），没有哨兵时用自捕获的 `.pi/vcc-plus/last-wire-request.json`。
+   双证据：字节层面（本条）+ 框架层面（`round.prefixSuspect` 的 cacheRead 断言）。

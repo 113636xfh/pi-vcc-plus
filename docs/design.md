@@ -13,12 +13,13 @@
 |---|---|
 | 用 `session_before_compact` 接管，而不是新造触发 | pi 的触发点天然位于"工具批次结束 / 下一次 assistant 请求之前"，正是安全截断点；手动 `/compact` 沿用 pi 自己的 abort |
 | 指令只加在**尾部**，system/tools 不动 | 原生的摘要请求换 system prompt + 重排正文 + 去掉 tools，token 0 就变了 → 必然 miss |
-| tools 只从 `before_provider_request` 的 payload 取 | 事件 ctx 不暴露 `getAllTools` / `getSystemPromptOptions`，registry 顺序 ≠ 线上顺序；payload 是上一次请求自己的 wire tools，唯一逐字节等价来源。Anthropic 的 `input_schema` 映射回 `parameters`（pi-ai 正是用它重新生成 wire `input_schema`，round-trip 稳定）；`toolsRoundTripStatus` 运行时再验 wire tools 不含不可重建形状（grammar/custom、`strict: true`、`defer_loading`、未知形状），含则检查 fail-closed |
+| tools 只从 `before_provider_request` 的 payload 取 | 事件 ctx 不暴露 `getAllTools` / `getSystemPromptOptions`，registry 顺序 ≠ 线上顺序；payload 是上一次请求自己的 wire tools，唯一逐字节等价来源。校验请求经**自定义 fetch** 发出：出站 body 的 `tools` 被替换为捕获到的**原始 wire tools**（构造性字节一致，pi-ai 的重建永远不上 wire）。`toolsRoundTripStatus` 保留为三保险：wire tools 含 grammar/custom、`strict: true`、`defer_loading` 或未知形状时检查 fail-closed |
 | 检查用"打补丁"而不是"重写摘要" | 模型无法破坏 VCC 的结构；失败可定位到行；`oldText` 唯一匹配的语义与原生 edit 一致，模型最熟练 |
 | 只用 `vcc_patch` / `vcc_draft` / `vcc_done` | 校验阶段给模型一个封闭的动作空间；`vcc_draft` 仅在 diff 不足以判断时使用 |
 | 上限用 `min(0.8 × reserveTokens, model.maxTokens)` | 与 pi 原生摘要完全相同的预算公式；写进提示词，并由 P4 校验（同一个取值来源） |
 | 护栏只用计数（轮次/失败次数/draft 读取次数） | 慢模型单次调用几十秒很正常，用时间判断会误杀 |
-| 失败 fail-closed（不静默回退原生） | 静默回退会让"前缀复用"这个核心目标失效，而且用户无法察觉 |
+| 校验请求的字节级复核（B 面，自验证） | 校验请求走 `ModelRegistry.complete` → `runtime.complete`，**不经过** Agent 的 `onPayload`，哨兵看不到它；所以 pi-vcc-plus 自己的 fetch 拦截：tools 原样替换 + 首次出站 body 与上一次真实请求的 wire body 前缀比较（基线优先哨兵 `last-request.json`，否则自捕获 `.pi/vcc-plus/last-wire-request.json`），结果写 `checkPrefix` 日志、完整 body 写 `.pi/prefix-sentinel/check-request.json` |
+| 失败 fail-closed（不静默回退原生） | 静默回退会让“前缀复用”这个核心目标失效，而且用户无法察觉 |
 | 提示词全英文 | 与 pi 原生提示词同语言；避免中英混排造成的模板/缓存差异 |
 
 ## 模型可见文本（三处，互不重复）

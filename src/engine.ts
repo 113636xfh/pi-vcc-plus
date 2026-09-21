@@ -6,6 +6,8 @@
  * vcc_patch / vcc_draft / vcc_done -> the corrected draft becomes the
  * compaction summary. No extra summarization request, no prefix change.
  */
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { convertToLlm } from "@earendil-works/pi-coding-agent";
 import { type Config } from "./config";
 import { createLogger, type Logger } from "./log";
@@ -30,6 +32,9 @@ interface Snapshot {
   systemPrompt: string;
   tools?: Any[];
   toolsSource: string;
+  /** Raw wire tools from the last request's payload (byte-exact, used to
+   * replace the check request's tools via the custom fetch). */
+  wireTools?: Any[];
   /** "mismatch" = the wire tools contain shapes that cannot be reconstructed
    * byte-exactly (grammar/custom tools, strict: true, deferred loading, or an
    * unrecognized shape) — the check request must fail closed. */
@@ -100,6 +105,21 @@ export function recordPayload(payload: Any, ctx: Any): void {
     snapshot.toolsSource = "before_provider_request.payload";
   }
   snapshot.toolsRoundTrip = toolsRoundTripStatus(wireTools);
+  if (Array.isArray(wireTools)) snapshot.wireTools = wireTools;
+  // Self wire-baseline for check-request verification (fallback when the
+  // prefix-sentinel is not installed). Best-effort; never throws.
+  try {
+    const cwd = typeof ctx?.cwd === "string" ? ctx.cwd : process.cwd();
+    const dir = join(cwd, ".pi", "vcc-plus");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "last-wire-request.json"),
+      JSON.stringify({ ts: Date.now(), pretty: JSON.stringify(payload, null, 2) }),
+      "utf8",
+    );
+  } catch {
+    /* baseline is optional evidence, not part of the request path */
+  }
 }
 
 function safeSystemPrompt(ctx: Any): string {
@@ -166,6 +186,120 @@ export function toolsRoundTripStatus(wireTools: Any): "ok" | "mismatch" | undefi
     if (!hasOpenAiFunction && !hasAnthropicSchema && !hasPlainSchema) return "mismatch";
   }
   return "ok";
+}
+
+/**
+ * Byte-exact verification of the outgoing check request against the previous
+ * real request's wire body. The check request's body may legitimately be
+ * LONGER (the tail instruction is appended after the snapshot's messages),
+ * so this is a prefix comparison: system, tools and the first
+ * `baseline.messages.length` messages must match exactly.
+ */
+export function verifyCheckPrefix(
+  baseline: Any,
+  check: Any,
+  source: "sentinel" | "self",
+): {
+  identical: boolean;
+  baselineSource: "sentinel" | "self";
+  checks: { system: boolean; tools: boolean; messages: boolean };
+  firstDivergence: { field: "system" | "tools" | "messages"; index?: number } | null;
+  messages: { baseline: number; check: number };
+} {
+  const systemEq = JSON.stringify(baseline?.system ?? null) === JSON.stringify(check?.system ?? null);
+  const toolsEq = JSON.stringify(baseline?.tools ?? null) === JSON.stringify(check?.tools ?? null);
+  const bm = Array.isArray(baseline?.messages) ? baseline.messages : [];
+  const cm = Array.isArray(check?.messages) ? check.messages : [];
+  let messagesEq = cm.length >= bm.length;
+  let firstIndex = -1;
+  const n = Math.min(bm.length, cm.length);
+  for (let i = 0; i < n; i++) {
+    if (JSON.stringify(bm[i]) !== JSON.stringify(cm[i])) {
+      firstIndex = i;
+      messagesEq = false;
+      break;
+    }
+  }
+  if (!messagesEq && firstIndex === -1) firstIndex = cm.length; // baseline longer: dropped tail
+  const identical = systemEq && toolsEq && messagesEq;
+  return {
+    identical,
+    baselineSource: source,
+    checks: { system: systemEq, tools: toolsEq, messages: messagesEq },
+    firstDivergence: !systemEq
+      ? { field: "system" }
+      : !toolsEq
+        ? { field: "tools" }
+        : !messagesEq
+          ? { field: "messages", index: firstIndex }
+          : null,
+    messages: { baseline: bm.length, check: cm.length },
+  };
+}
+
+/**
+ * Wire baseline for the check-request verification. The prefix-sentinel's
+ * capture is preferred (independent code path); our own capture is the
+ * fallback when the sentinel is not installed.
+ */
+export function readWireBaseline(cwd: string | undefined): { pretty: string; source: "sentinel" | "self" } | null {
+  if (typeof cwd !== "string") return null;
+  const candidates: Array<["sentinel" | "self", string]> = [
+    ["sentinel", join(cwd, ".pi", "prefix-sentinel", "last-request.json")],
+    ["self", join(cwd, ".pi", "vcc-plus", "last-wire-request.json")],
+  ];
+  for (const [source, path] of candidates) {
+    try {
+      if (!existsSync(path)) continue;
+      const parsed = JSON.parse(readFileSync(path, "utf8")) as Any;
+      if (typeof parsed?.pretty === "string") return { pretty: parsed.pretty, source };
+    } catch {
+      /* try the next candidate */
+    }
+  }
+  return null;
+}
+
+/**
+ * Custom fetch for the check request. Does two things, both by construction:
+ *  1. Replaces the outgoing body's `tools` with the captured RAW wire tools
+ *     (byte-exact — pi-ai's own reconstruction of tools never reaches the
+ *     wire, which also removes the round-trip concern entirely).
+ *  2. Captures the first outgoing body for byte-level verification against
+ *     the previous real request (see verifyCheckPrefix).
+ *
+ * Re-serialization is byte-stable: JSON.parse preserves key order and the
+ * body was itself produced by JSON.stringify, so untouched fields come back
+ * identical. Any failure degrades to the original request (never breaks it).
+ */
+type FetchLike = (input: Any, init?: Any) => Promise<unknown>;
+
+export function buildCheckFetch(
+  wireTools: Any,
+  capture: { url?: string; bodyText?: string },
+): FetchLike {
+  const realFetch: FetchLike = globalThis.fetch;
+  return async (input, init) => {
+    let out: Any = init;
+    try {
+      const bodyText = typeof (init as { body?: unknown })?.body === "string" ? (init as { body: string }).body : "";
+      const parsed = bodyText ? (JSON.parse(bodyText) as Any) : null;
+      if (parsed && Array.isArray(wireTools)) {
+        parsed.tools = wireTools;
+      }
+      if (parsed) {
+        out = { ...(init as object), body: JSON.stringify(parsed) };
+      }
+      // no body / unparseable body: keep the original request untouched
+    } catch {
+      out = init; // never break the request over capture problems
+    }
+    if (capture.bodyText === undefined) {
+      capture.url = typeof input === "string" ? input : (input as Any)?.url ?? "";
+      capture.bodyText = typeof (out as { body?: unknown })?.body === "string" ? (out as { body: string }).body : "";
+    }
+    return realFetch(input, out);
+  };
 }
 
 const BLOCKED_IMAGE_TEXT = "Image reading is disabled.";
@@ -372,6 +506,11 @@ async function runCheckLoop(args: {
 }): Promise<{ summary: string; usage: Usage; rounds: number }> {
   const { ctx, model, cfg, signal, capTokens, charsPerToken, reserveTokens, customInstructions, log } = args;
   const usage = emptyUsage();
+  // Byte-level verification of the check request (round 1 only): the custom
+  // fetch below injects the captured wire tools verbatim and captures the
+  // outgoing body, which is then compared against the previous real
+  // request's wire body (sentinel baseline, else our own capture).
+  const checkCapture: { url?: string; bodyText?: string } = {};
   const draftTokens = tokensOf(phase!.draft, charsPerToken);
   const instruction = buildTailInstruction({
     draft: phase!.draft,
@@ -420,7 +559,11 @@ async function runCheckLoop(args: {
       response = await ctx.modelRegistry.complete(
         model,
         { systemPrompt: snapshot?.systemPrompt, messages, tools },
-        { maxTokens: capTokens, signal: controller.signal },
+        {
+          maxTokens: capTokens,
+          signal: controller.signal,
+          fetch: buildCheckFetch(snapshot?.wireTools, checkCapture),
+        },
       );
     } finally {
       if (timer) clearTimeout(timer);
@@ -450,6 +593,34 @@ async function runCheckLoop(args: {
 
     phase!.guard.rounds += 1;
     addUsage(usage, response?.usage);
+
+    // Verify the check request's bytes against the last real request (once,
+    // on the first round). The body is written next to the sentinel's files
+    // so it can be inspected independently.
+    if (phase!.guard.rounds === 1 && checkCapture.bodyText) {
+      const baseline = readWireBaseline(ctx?.cwd);
+      if (baseline) {
+        try {
+          const verification = verifyCheckPrefix(
+            JSON.parse(baseline.pretty),
+            JSON.parse(checkCapture.bodyText),
+            baseline.source,
+          );
+          try {
+            const dir = join(ctx?.cwd, ".pi", "prefix-sentinel");
+            mkdirSync(dir, { recursive: true });
+            writeFileSync(join(dir, "check-request.json"), checkCapture.bodyText, "utf8");
+          } catch {
+            /* the log line below still records the result */
+          }
+          log("checkPrefix", verification);
+        } catch (e) {
+          log("checkPrefix", { identical: null, error: String(e) });
+        }
+      } else {
+        log("checkPrefix", { identical: null, baselineSource: null, reason: "no wire baseline (sentinel not installed and self-capture missing)" });
+      }
+    }
 
     const prefixTokens = snapshot?.prefixTokens ?? 0;
     const cacheRead = response?.usage?.cacheRead ?? 0;
@@ -690,6 +861,9 @@ export const __internals = {
   compileDraft,
   toolsFromPayload,
   toolsRoundTripStatus,
+  buildCheckFetch,
+  verifyCheckPrefix,
+  readWireBaseline,
   blockImageMessages,
   extractSection,
   runCheckLoop,
