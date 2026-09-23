@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 360" font-family="'Noto Sans CJK SC','Noto Sans',sans-serif">
+  <rect x="0" y="0" width="1280" height="360" fill="#ffffff"/>
+
+  <text x="640" y="52" font-size="26" font-weight="bold" fill="#1a202c" text-anchor="middle">压缩接管全流程</text>
+  <text x="640" y="86" font-size="15" fill="#5a6a80" text-anchor="middle">pi 判定要压缩时（自动或手动 /compact），本流程接管摘要</text>
+
+  <!-- node 1: VCC draft (gray, local) -->
+  <rect x="40" y="140" width="240" height="88" rx="10" fill="#f7f9fb" stroke="#94a3b8" stroke-width="2"/>
+  <text x="160" y="170" font-size="20" font-weight="bold" fill="#2d3748" text-anchor="middle">VCC 机械草稿</text>
+  <text x="160" y="198" font-size="15" fill="#5a6a80" text-anchor="middle">本地抽取 · 零模型调用</text>
+
+  <!-- node 2: build check request (green) -->
+  <rect x="360" y="140" width="240" height="88" rx="10" fill="#eefaf3" stroke="#22a06b" stroke-width="2"/>
+  <text x="480" y="170" font-size="20" font-weight="bold" fill="#1e7a4c" text-anchor="middle">组装检查请求</text>
+  <text x="480" y="198" font-size="15" fill="#5a6a80" text-anchor="middle">前缀复用 + 尾部指令</text>
+
+  <!-- node 3: model patch loop (orange = core LLM step) -->
+  <rect x="680" y="140" width="240" height="88" rx="10" fill="#fdeacc" stroke="#e8850c" stroke-width="2"/>
+  <text x="800" y="170" font-size="20" font-weight="bold" fill="#9a4d00" text-anchor="middle">模型打补丁循环</text>
+  <text x="800" y="198" font-size="15" fill="#5a6a80" text-anchor="middle">vcc_patch · vcc_done</text>
+
+  <!-- node 4: finalize (blue) -->
+  <rect x="1000" y="140" width="240" height="88" rx="10" fill="#eef3fb" stroke="#3b82c4" stroke-width="2"/>
+  <text x="1120" y="170" font-size="20" font-weight="bold" fill="#1d4f8a" text-anchor="middle">定稿写入会话</text>
+  <text x="1120" y="198" font-size="15" fill="#5a6a80" text-anchor="middle">摘要 + 尾部原样保留</text>
+
+  <!-- arrows: edge center to edge center, mid-height y=184 -->
+  <line x1="280" y1="184" x2="346" y2="184" stroke="#718096" stroke-width="2.5"/>
+  <polygon points="346,176 346,192 360,184" fill="#718096"/>
+  <line x1="600" y1="184" x2="666" y2="184" stroke="#718096" stroke-width="2.5"/>
+  <polygon points="666,176 666,192 680,184" fill="#718096"/>
+  <line x1="920" y1="184" x2="986" y2="184" stroke="#718096" stroke-width="2.5"/>
+  <polygon points="986,176 986,192 1000,184" fill="#718096"/>
+
+  <!-- loop return: node 3 bottom center -> node 2 bottom center (dashed) -->
+  <path d="M 800,228 L 800,300 L 480,300 L 480,242" fill="none" stroke="#94a3b8" stroke-width="2" stroke-dasharray="7 5"/>
+  <polygon points="472,242 488,242 480,228" fill="#94a3b8"/>
+  <text x="640" y="330" font-size="15" fill="#5a6a80" text-anchor="middle">直到 vcc_done 或护栏触发，再多一轮</text>
+</svg>

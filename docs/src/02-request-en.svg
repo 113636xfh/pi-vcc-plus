@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 360" font-family="'Noto Sans CJK SC','Noto Sans',sans-serif">
+  <rect x="0" y="0" width="1280" height="360" fill="#ffffff"/>
+
+  <text x="640" y="52" font-size="26" font-weight="bold" fill="#1a202c" text-anchor="middle">What the check request looks like</text>
+  <text x="640" y="86" font-size="15" fill="#5a6a80" text-anchor="middle">only the tail is new; everything before is reused byte-for-byte</text>
+
+  <!-- segment 1: reused prefix (green, large) -->
+  <rect x="40" y="140" width="860" height="88" rx="10" fill="#eefaf3" stroke="#22a06b" stroke-width="2"/>
+  <text x="470" y="170" font-size="20" font-weight="bold" fill="#1e7a4c" text-anchor="middle">reused prefix</text>
+  <text x="470" y="198" font-size="15" fill="#5a6a80" text-anchor="middle">system + tools + messages (last real request)</text>
+
+  <!-- segment 2: tail instruction (orange, the only new part) -->
+  <rect x="900" y="140" width="340" height="88" rx="10" fill="#fdeacc" stroke="#e8850c" stroke-width="2"/>
+  <text x="1070" y="170" font-size="20" font-weight="bold" fill="#9a4d00" text-anchor="middle">tail instruction</text>
+  <text x="1070" y="198" font-size="15" fill="#5a6a80" text-anchor="middle">draft + budget + patch rules</text>
+
+  <!-- caption: the consequence -->
+  <text x="640" y="300" font-size="15" fill="#5a6a80" text-anchor="middle">the prefix matches the previous request, so the KV cache is reused and only the new tail is prefilled</text>
+</svg>

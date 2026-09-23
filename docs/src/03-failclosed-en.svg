@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 440" font-family="'Noto Sans CJK SC','Noto Sans',sans-serif">
+  <rect x="0" y="0" width="1280" height="440" fill="#ffffff"/>
+
+  <text x="640" y="52" font-size="26" font-weight="bold" fill="#1a202c" text-anchor="middle">Failure handling: fail-closed</text>
+  <text x="640" y="86" font-size="15" fill="#5a6a80" text-anchor="middle">any failed check cancels the compaction — never silently falls back to native</text>
+
+  <!-- trigger chip (gray) -->
+  <rect x="370" y="120" width="220" height="48" rx="10" fill="#f7f9fb" stroke="#94a3b8" stroke-width="2"/>
+  <text x="480" y="150" font-size="20" font-weight="bold" fill="#2d3748" text-anchor="middle">draft ready</text>
+
+  <!-- arrow: chip bottom center -> gate top center -->
+  <line x1="480" y1="168" x2="480" y2="172" stroke="#718096" stroke-width="2.5"/>
+  <polygon points="472,172 488,172 480,186" fill="#718096"/>
+
+  <!-- gate: all checks pass? (green) -->
+  <rect x="330" y="186" width="300" height="76" rx="10" fill="#eefaf3" stroke="#22a06b" stroke-width="2"/>
+  <text x="480" y="216" font-size="20" font-weight="bold" fill="#1e7a4c" text-anchor="middle">all checks pass?</text>
+  <text x="480" y="244" font-size="15" fill="#5a6a80" text-anchor="middle">snapshot · tools · patch · budget</text>
+
+  <!-- yes: gate bottom center -> success top center -->
+  <line x1="480" y1="262" x2="480" y2="278" stroke="#718096" stroke-width="2.5"/>
+  <polygon points="472,278 488,278 480,292" fill="#718096"/>
+  <text x="494" y="282" font-size="15" fill="#5a6a80">yes</text>
+
+  <!-- success: finalize (green) -->
+  <rect x="330" y="292" width="300" height="64" rx="10" fill="#eefaf3" stroke="#22a06b" stroke-width="2"/>
+  <text x="480" y="320" font-size="20" font-weight="bold" fill="#1e7a4c" text-anchor="middle">write the session</text>
+  <text x="480" y="344" font-size="15" fill="#5a6a80" text-anchor="middle">summary replaces earlier history</text>
+
+  <!-- no rail: gate right-edge center -> fail left-edge center (red) -->
+  <line x1="630" y1="224" x2="836" y2="224" stroke="#d64545" stroke-width="2.5"/>
+  <polygon points="836,216 836,232 850,224" fill="#d64545"/>
+  <text x="642" y="216" font-size="15" fill="#d64545">no</text>
+
+  <!-- fail-closed box (gray) -->
+  <rect x="850" y="192" width="260" height="64" rx="10" fill="#f7f9fb" stroke="#94a3b8" stroke-width="2"/>
+  <text x="980" y="220" font-size="20" font-weight="bold" fill="#2d3748" text-anchor="middle">fail-closed</text>
+  <text x="980" y="244" font-size="15" fill="#5a6a80" text-anchor="middle">cancel + notify</text>
+
+  <!-- caption -->
+  <text x="640" y="416" font-size="15" fill="#5a6a80" text-anchor="middle">the session is untouched; an unchecked draft never becomes the summary</text>
+</svg>

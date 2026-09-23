@@ -1,33 +1,96 @@
-# Project-pi-vcc-plus
+# pi-vcc-plus
 
-把 pi 的上下文压缩从"另起一次摘要请求"改成 **VCC 机械草稿 + 模型就地打补丁**。
+> 把 pi 的上下文压缩从"另起一次摘要请求"改成 **VCC 机械草稿 + 模型就地打补丁**：
+> 压缩时前文一个字节都不改，不新增独立摘要请求，KV 前缀缓存直接复用。
+>
+> [English](README.en.md)
 
-核心目标：压缩时**不改动前文一个字节**（system + tools + messages 原样复用），只在会话尾部追加一条指令，
-于是"把 20 万–96 万 token 重新 prefill 一遍才写出摘要"的开销不再发生；压缩后重建上下文那一次 prefill 仍不可避免。
+## 为什么需要它
 
-## 目录结构
+pi 的原生压缩是一个**独立的摘要请求**：换掉 system prompt、重排正文、去掉 tools——token 0 就变了，
+上一次请求积累的全部前缀 KV 缓存作废，整个前缀要重新 prefill 一遍（会话越长越贵）。
 
+pi-vcc-plus 换了一种产出摘要的方式：
+
+1. **草稿由算法生成**——上游 [pi-vcc](https://github.com/sting8k/pi-vcc) 机械抽取：确定性、零模型调用、毫秒级；
+2. **模型只打补丁**——在当前会话尾部追加一条指令，模型用 `vcc_patch` 对草稿就地增删改（可多轮）；
+3. **前缀一个字节不动**——检查请求 = 上一次真实请求的原文（system + tools + messages）+ 尾部指令，
+   前缀逐字节相同 → 服务端 KV 缓存必然复用。
+
+代价：压缩后重建上下文那一次 prefill 仍不可避免（这是任何压缩方式的共同成本）。
+
+## 与上游 pi-vcc 的关系
+
+本扩展基于 [@sting8k/pi-vcc](https://www.npmjs.com/package/@sting8k/pi-vcc)（MIT，锁定 v0.8.0，
+git submodule `third_party/pi-vcc` @ `303e89d`）：
+
+| | pi-vcc（上游） | pi-vcc-plus（本扩展） |
+|---|---|---|
+| 草稿生成 | 机械抽取算法（结构、预算锚、校准） | 复用上游，不复制不改写（直接读它的源码） |
+| 模型参与 | 无（纯算法） | 检查循环：`vcc_patch` / `vcc_draft` / `vcc_done` 就地修正 |
+| 前缀稳定性 | 不处理 | 快照复用 + 字节级复核 + fail-closed |
+| 历史检索 | `vcc_recall`（读原始 JSONL） | 默认注册（可关闭） |
+
+加载器只读上游**发布出来的源码**，一行不改。更新上游：
+
+```powershell
+git submodule update --remote --merge third_party/pi-vcc
+git add third_party/pi-vcc
+git commit -m "bump pi-vcc"
 ```
-index.ts                 pi 扩展入口（系统提示词块 + 三个工具 + 快照 + 压缩接管）
-src/
-  config.ts              配置与系统提示词块（英文常量）
-  prompt.ts              尾部指令 / diff 回执 / P1–P4 错误文案（英文）
-  patch.ts               补丁应用与校验（纯逻辑，有单测）
-  engine.ts              快照 / 草稿 / 校验循环 / fail-closed
-  vcc.ts                 加载上游 pi-vcc（不复制、不改写）
-  log.ts                 ~/.pi/agent/vcc-plus/log/<sessionId>.jsonl
-test/
-  patch.test.ts          P1–P4 单测（10 例）
-  draft-smoke.ts         真实会话离线生成草稿（不调模型）
-third_party/pi-vcc/      上游 VCC（submodule；当前为未修改的 0.8.0 本地副本占位）
-docs/                    设计说明与对比记录
-scripts/                 维护脚本
-```
+
+（`scripts/setup-upstream-vcc.ps1` 只用于"重做这次切换"——把仓库里的本地副本换成 submodule。）
+
+> 如果你另装了 pi-vcc 本体（`pi install npm:@sting8k/pi-vcc`），请在 `~/.pi/agent/settings.json`
+> 里把它设为**安装但不加载**：`{ "source": "npm:@sting8k/pi-vcc", "extensions": [] }`。
+> 否则它自己的 `session_before_compact` 钩子会和本扩展抢同一次压缩。
+
+## 工作原理
+
+### 压缩接管全流程
+
+![压缩接管全流程](docs/images/01-flow.png)
+
+触发点复用 pi 原生：上下文将满自动触发，或手动 `/compact`（沿用 pi 自己的 abort 语义）。
+接管发生在 `session_before_compact` 事件——拿到 pi 已算好的 preparation（切点、待摘要区间、预算）之后：
+
+1. **VCC 机械草稿**：本地运行上游 pi-vcc 生成结构化草稿（零模型调用）；
+2. **组装检查请求**：上一次 provider 请求的快照（system + tools + messages 原文）+ 尾部指令（草稿、预算、补丁规则）；
+3. **模型打补丁循环**：模型在"压缩校验阶段"用三个封闭工具修正草稿，可多轮；
+4. **定稿写入会话**：定稿摘要返回给 pi，由 pi 写 `CompactionEntry`；保留的尾部原样进入下一个窗口。
+
+### 检查请求的构成
+
+![检查请求的构成](docs/images/02-request.png)
+
+- **messages**：`context` 事件在每次 provider 请求前触发，快照保存的是模型实际看到的 agent 格式消息
+  （`images.blockImages` 开启时做与 pi `convertToLlmWithBlockImages` 相同的替换）；
+- **tools**：只从 `before_provider_request` 的 payload 取（上一次请求自己的 wire tools，含顺序）；
+  检查请求经自定义 fetch 发出，出站 body 的 `tools` 被替换为这份**原始 wire tools**——构造性字节一致
+  （pi-ai 自己的重建永远不上 wire）；
+- **字节级复核**：第 1 轮把出站 body 与上一次真实请求的 wire body 做前缀比较（system / tools / messages），
+  结果写 `checkPrefix` 日志（`identical` + `firstDivergence`），完整 body 写 `.pi/prefix-sentinel/check-request.json`。
+  基线要求新鲜（`ts ≥ 快照时刻`），旧进程/其它会话的残留不会误报；
+- **框架层断言**：`round.cacheRead ≈ 前缀长度`（`prefixSuspect` 必须为 false）——同一不变量的第二道防线。
+
+### 失败处理
+
+![失败处理：fail-closed](docs/images/03-failclosed.png)
+
+| 触发 | 例子 |
+|---|---|
+| 快照缺失 | 全新会话还没发生过 provider 请求（`/reload` 后先尝试恢复持久化快照；仅全新会话需先发一条消息） |
+| tools 不可用/不一致 | 拿不到 wire tools；wire tools 含 grammar/custom、`strict: true`、`defer_loading` |
+| 补丁校验失败 | P1–P4：oldText 找不到/不唯一、超预算、连续失败超限 |
+| 模型异常 | API 错误、中止、纯文本收尾但 `requireDone`、轮次/draft 读取上限 |
+
+默认策略 `onFailure: auto`：手动 `/compact` → 抛错；自动压缩 → 取消 + 通知。
+`fallbackToNative: false`——**绝不静默退回原生摘要**：静默回退会让"前缀复用"这个核心目标失效，而且用户无法察觉。
 
 ## 安装
 
 ```powershell
-# 0) 安装依赖（submodule 里的 recall 工具会 import typebox，从仓库根解析）
+# 0) 安装依赖（submodule 里的 recall 工具 import typebox，从仓库根解析）
 npm install        # lockfile 已提交；bun install 亦可（测试用 bun 跑）
 
 # 1) 安装扩展本身（本地路径不会被复制，改代码后 /reload 即可生效）
@@ -36,10 +99,6 @@ pi install "<repo-dir>"
 # 2) 让 pi 能加载 VCC：三条路任选其一（见下）
 ```
 
-> 为什么要 `bun install`：我们直接加载 **上游** `third_party/pi-vcc/src/tools/recall.ts`，
-> 它 `import { Type } from "typebox"`，而 submodule 自己没有 node_modules；
-> 仓库根装上 `typebox@1.3.7`（与 pi 自带版本一致）后，Node 的解析会从 submodule 向上找到它。
-
 `src/vcc.ts` 按以下顺序解析上游 pi-vcc（都用它**发布出来的源码**，我们不改它一行）：
 
 1. `config.vccPackagePath`（显式指定）
@@ -47,39 +106,6 @@ pi install "<repo-dir>"
 3. **仓库内** `third_party/pi-vcc`（推荐：git submodule）
 4. `~/.pi/agent/npm/node_modules/@sting8k/pi-vcc`（`pi install npm:@sting8k/pi-vcc` 装的位置）
 5. `<cwd>/.pi/npm/node_modules/@sting8k/pi-vcc`
-
-> 用 npm 路线时，请在 `~/.pi/agent/settings.json` 里把它设为 **安装但不加载**：
-> `{ "source": "npm:@sting8k/pi-vcc", "extensions": [] }`
-> 否则它自己的 `session_before_compact` 钩子会和本扩展抢同一次压缩。
-
-## 上游 VCC（git submodule）
-
-`third_party/pi-vcc` 是指向 <https://github.com/sting8k/pi-vcc> 的 submodule，当前固定在 `303e89d`
-（v0.8.0 之后的一个 docs 提交）。加载器直接读它的源码：**我们不复制、不修改上游代码**。
-
-更新上游：
-
-```powershell
-git submodule update --remote --merge third_party/pi-vcc
-git add third_party/pi-vcc
-git commit -m "bump pi-vcc"
-```
-
-`scripts/setup-upstream-vcc.ps1` 只用于"重做这次切换"（把仓库里的本地副本换成 submodule）。
-
-## 工作流程
-
-```
-① 触发压缩（复用 pi 现有触发点：工具批次结束 / 回复结束；手动 /compact 沿用 pi 自己的 abort）
-② 本地跑 VCC → 草稿（零模型调用）
-③ 取上一次请求的快照（system + tools + messages 原文）+ 尾部追加指令 → 一次请求
-④ 模型用 vcc_patch 打补丁（可多轮）；vcc_draft 看全文；vcc_done 结束
-⑤ 校验 P1–P4（工具内部，纯本地）
-⑥ 应用后的草稿 = 定稿摘要 → 写 CompactionEntry
-⑦ 重建上下文 = 定稿摘要 + 保留的尾部几轮 → 同一 run 继续（一次不可避免的 prefill）
-```
-
-细节见 [docs/design.md](docs/design.md)；VCC 的实测对比见 [docs/vcc-vs-native-notes.md](docs/vcc-vs-native-notes.md)。
 
 ## 配置
 
@@ -100,62 +126,75 @@ git commit -m "bump pi-vcc"
 }
 ```
 
+- `checkModel: null` = 检查请求跟随会话当前模型；
 - `guards` 全部是**计数**：慢模型不会被时间掐断（`callTimeoutMs` 默认 0 = 不限）；
-  `requireDone: true` 时模型必须显式 `vcc_done`（纯文本收尾升级为失败，默认只警告）。
-- `onFailure`：`auto`（手动抛错 / 自动 cancel+通知）、`cancel`、`throw`、`draft`（显式回退未校验草稿）。
-- `fallbackToNative: false` = 失败时不静默退回 pi 原生摘要。
-- `upstreamRecallTool: true` = 注册上游 pi-vcc 自带的只读 `vcc_recall`（校验阶段内被拒绝）。
-- 配置只在扩展加载时读一次；改 `config.json` 需 `/reload`（中途改会改变系统块、破坏前缀不变量）。
+  `requireDone: true` 时模型必须显式 `vcc_done`（纯文本收尾升级为失败，默认只警告）；
+- `onFailure`：`auto`（手动抛错 / 自动 cancel+通知）、`cancel`、`throw`、`draft`（显式回退未校验草稿）；
+- `fallbackToNative: false` = 失败时不静默退回 pi 原生摘要；
+- `upstreamRecallTool: true` = 注册上游 pi-vcc 自带的只读 `vcc_recall`（校验阶段内被拒绝）；
+- 配置只在扩展加载时读一次；改 `config.json` 需 `/reload`（中途改会改变系统块、破坏前缀不变量）；
 - 草稿的 chars/token 校准沿用上游 `before-compact.ts` 的锚（span 字符 + 上次摘要字符 ÷ `tokensBefore`）：
-  这是上游算法的行为（对估算偏保守），我们刻意保持一致、不单方分叉；如需精确控制可用 `checkModel` 换模型或向上游提 issue。
+  这是上游算法的行为（对估算偏保守），我们刻意保持一致、不单方分叉。
 
 ## 测试
 
 ```powershell
-bun run typecheck                            # tsc --noEmit（strict；捕获运行时才会暴露的类型错误）
+bun run typecheck                            # tsc --noEmit（strict）
 bun test test/                              # P1–P4 单测 + 校验循环回归 + recall 加载
-bun run test/draft-smoke.ts <session.jsonl> 0  # 用真实会话离线生成草稿（不调模型）
+bun run test/draft-smoke.ts <session.jsonl>  # 用真实会话离线生成草稿（不调模型）
+node scripts/e2e-rpc-compact-test.mjs        # RPC E2E：种子短会话 → 三轮 → /compact
+node scripts/e2e-rpc-compact-resume.mjs      # 恢复压缩后的会话 → 提问 → 第二次 /compact
 ```
 
-> `bun run typecheck` 需要 devDependencies（`typescript`、`@earendil-works/pi-coding-agent@0.85.1` 等，
-> 与运行中的 pi 同版本）：`bun install` 或 `npm install` 装一次即可。
-> 仓库路径含 `&`，Windows 下 `.bin` shim 会解析失败——直接 `node node_modules/typescript/bin/tsc -p tsconfig.json`。
+> `bun run typecheck` 需要 devDependencies（`typescript`、`@earendil-works/pi-coding-agent@0.85.1` 等）：
+> `npm install` 或 `bun install` 装一次即可。
+> 仓库路径含 `&`，Windows 下 `.bin` shim 会解析失败——直接
+> `node node_modules/typescript/lib/tsc.js -p tsconfig.json`。
+> 另备 `tsconfig.check-087.json` 对 0.87.0 类型做同法检查。
+
+## 目录结构
+
+```
+index.ts                 pi 扩展入口（系统提示词块 + 三个工具 + 快照 + 压缩接管）
+src/
+  config.ts              配置与系统提示词块（英文常量）
+  prompt.ts              尾部指令 / diff 回执 / 错误文案（英文）
+  patch.ts               补丁应用与校验（纯逻辑，有单测）
+  engine.ts              快照 / 草稿 / 校验循环 / fail-closed
+  vcc.ts                 加载上游 pi-vcc（不复制、不改写）
+  log.ts                 ~/.pi/agent/vcc-plus/log/<sessionId>.jsonl
+test/                    单测、回归与 recall 加载
+docs/
+  design.md              详细设计（不变量、决策表、模型可见文本）
+  vcc-vs-native-notes.md 实测对比
+  src/*.svg              插图源码（手工布局，可编辑）
+  images/*.png           渲染产物（已提交，GitHub 可直接引用）
+  render.mjs / verify.mjs / probe-pixels.mjs   渲染与验证脚本
+scripts/                 E2E 与 maintainer 脚本
+third_party/pi-vcc/      上游 pi-vcc（git submodule，锁定版本）
+```
 
 ## 日志与验收
 
-`~/.pi/agent/vcc-plus/log/<sessionId>.jsonl`：`vcc_loaded`、`draft`、`round`（含 `cacheRead`、
-`expectedPrefixTokens`、`prefixSuspect`、`toolsSource`）、`checkPrefix`（校验请求字节验证结果）、
-`tool`、`summary_final`、`fail_closed`。
+`~/.pi/agent/vcc-plus/log/<sessionId>.jsonl`：`vcc_loaded`、`draft`、`checkPrefix`、
+`round`（含 `cacheRead`、`expectedPrefixTokens`、`prefixSuspect`、`toolsSource`）、
+`tool`、`summary_final`、`snapshot_restored`、`fail_closed`。
 
 **首次实测要看的一条**：`round.prefixSuspect` 必须为 false（即 `cacheRead ≈ 前缀长度`），
 否则说明前文被改动了，前缀复用没有成立。
 
-## 已对 pi 0.85.1 源码核实的前缀等价性
+## 已知限制
 
-1. **messages**：`context` 事件在每次 provider 请求前触发，`convertToLlm(event.messages)` 与 pi 自己
-   的转换同函数；`images.blockImages` 开启时快照做了与 pi `convertToLlmWithBlockImages` 完全相同的替换。
-2. **system prompt**：`before_agent_start` 在首个请求前就把扩展块并入 `agent.state.systemPrompt`，
-   快照读到的与请求实际用的同值；块本身是常量，每轮不变。
-3. **tools**：事件 ctx 不暴露 `getAllTools` / `getSystemPromptOptions`，所以 tools 只从
-   `before_provider_request` 的 payload 取（上一次请求自己的 wire tools，含顺序）。
-   校验请求经**自定义 fetch** 发出：出站 body 里的 `tools` 被替换为捕获到的**原始 wire tools**
-   （构造性字节一致，pi-ai 自己的重建永远不上 wire；这也顺带消除了 round-trip 隐患）。
-   `toolsRoundTripStatus` 保留为三保险：wire tools 含 grammar/custom 形状、`strict: true`
-   （来自 wire 不携带的 `constrainedSampling`）或 `defer_loading` 时标记 `mismatch`，检查 fail-closed。
-   `toolsSource` 因此恒为 `before_provider_request.payload`；拿不到 tools 时 fail-closed（不再发降级请求）。
-4. **单轮失败**：pi-ai 对 API 错误/中止是 resolve 返回 `stopReason: "error" | "aborted"` 的
-   AssistantMessage（不 reject）——校验循环现在检查 `stopReason`/`errorMessage`/abort，
-   失败即走 fail-closed，绝不把未校验草稿当定稿。
-5. **校验请求的字节级复核（B 面）**：校验请求不走 Agent 的 stream 路径
-   （`ModelRegistry.complete` → `runtime.complete`，不经过 `onPayload`/`before_provider_request`），
-   所以 prefix-sentinel 看不到它——它由 pi-vcc-plus 自己的 fetch 拦截验证：
-   第一次出站 body 与上一次真实请求的 wire body 做前缀比较（system / tools / 前 N 条
-   messages），结果写 `checkPrefix` 日志（`identical` + `firstDivergence`），完整 body 写到
-   `.pi/prefix-sentinel/check-request.json`。基线要求**新鲜**（`ts ≥ 快照时刻`，
-   取较新者，平手优先哨兵）——旧进程/其它会话的残留基线会被忽略而不是误报。
-   `checkPrefix` 在第 1 轮**必有**一行：验到与否都是可见状态
-   （fetch 没被调用 / 没捕到 body / 无新鲜基线 → `identical: null` + `reason`）。
-   双证据：字节层面（本条）+ 框架层面（`round.prefixSuspect` 的 cacheRead 断言）。
-6. **冷启动**：快照只存在于扩展观察到新 provider 请求之后。
-   `/reload`（或新会话）后立刻 `/compact` 会 fail-closed（取消 + 提示）——
-   先发一条普通消息（建立快照），再 `/compact` 即可。
+- **冷启动**：快照只在扩展观察到新 provider 请求之后建立。`/reload`（或新进程）后 `/compact`
+  会先尝试从持久化快照恢复（同会话 + 完整 + round-trip 通过），恢复不了才 fail-closed——
+  只有全新会话（从未有过 provider 请求）需要先发一条普通消息；
+- 检查请求由扩展直接用 `ModelRegistry.complete` 发出（不走 Agent 流式路径），
+  `before_provider_request` 等钩子对它不触发——所以它的字节一致性由扩展自己的
+  fetch 拦截验证（B 面）；钩子层的观测插件对它不可见（wire 层的全局 fetch 包装仍可见）；
+- 若其它扩展注入 mid-conversation system 消息且模型支持缓存，检查请求前缀会从该消息起分叉——
+  `firstDivergence` 记录可见（非静默）；
+- token 估算基于字符数启发式（沿用上游算法），偏保守。
+
+## License
+
+MIT — 见 [LICENSE](LICENSE)
