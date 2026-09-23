@@ -14,3 +14,4 @@ tmp-*/
 Thumbs.db
 .idea/
 .vscode/
+.pi/

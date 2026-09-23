@@ -479,6 +479,10 @@ interface Usage {
   output: number;
   cacheRead: number;
   cacheWrite: number;
+  /** pi-ai 0.87: subset of cacheWrite written with 1h retention (Anthropic only). */
+  cacheWrite1h?: number;
+  /** pi-ai 0.87: reasoning tokens, a subset of output (provider-dependent). */
+  reasoning?: number;
   totalTokens: number;
   cost: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
 }
@@ -498,6 +502,14 @@ const addUsage = (target: Usage, source: Any): void => {
   target.output += source.output ?? 0;
   target.cacheRead += source.cacheRead ?? 0;
   target.cacheWrite += source.cacheWrite ?? 0;
+  // Optional provider-reported breakdowns (pi-ai 0.87 Usage). Mirror pi's
+  // combineUsage: stay undefined unless at least one side reports them.
+  if (source.cacheWrite1h !== undefined || target.cacheWrite1h !== undefined) {
+    target.cacheWrite1h = (target.cacheWrite1h ?? 0) + (source.cacheWrite1h ?? 0);
+  }
+  if (source.reasoning !== undefined || target.reasoning !== undefined) {
+    target.reasoning = (target.reasoning ?? 0) + (source.reasoning ?? 0);
+  }
   target.totalTokens += source.totalTokens ?? (source.input ?? 0) + (source.output ?? 0);
 };
 
@@ -717,7 +729,7 @@ export async function onBeforeCompact(event: Any, ctx: Any, cfg: Config): Promis
   const prep = event?.preparation;
   const log = createLogger(safeSessionId(ctx), cfg.debugLog);
   const reason = String(event?.reason ?? "auto");
-  log("compact_start", { reason, tokensBefore: prep?.tokensBefore, firstKeptEntryId: prep?.firstKeptEntryId });
+  log("compact_start", { reason, willRetry: event?.willRetry ?? false, tokensBefore: prep?.tokensBefore, firstKeptEntryId: prep?.firstKeptEntryId });
 
   if (!prep) {
     log("abort", { why: "no preparation" });
