@@ -11,8 +11,11 @@ export function buildTailInstruction(args: {
 }): string {
   const { draft, capTokens, reserveTokens, modelMaxTokens, draftTokens, customInstructions } = args;
   return `The block below is the mechanical compaction draft for this window. The draft plus your patches
-becomes the summary at the start of the next context window; the last few turns of this
-conversation are kept verbatim, and everything else will no longer be present afterwards.
+becomes the summary at the start of the next context window. The recent turns still visible at
+the end of this conversation are kept verbatim and will remain in the context afterwards;
+everything before them will no longer be present. The summary must therefore carry that earlier
+part of the session, and must NOT restate the content, state, or outcomes of the kept turns -
+the model that reads the summary will see those turns right below it.
 
 <draft>
 ${draft}
@@ -42,6 +45,8 @@ following, so check this conversation for them and add whatever is missing:
 - Content that is no longer relevant may be deleted; only use what you actually saw in this
   conversation - do not invent
 - Keep each section concise. Preserve exact file paths, function names, and error messages.
+- The kept recent turns stay in the next window: do not restate their content, status, or
+  outcomes in the summary (a one-line forward pointer such as "next step: X" is fine)
 - Use vcc_draft only when the diff receipt is not enough to judge the draft (usually not needed)`;
 }
 
