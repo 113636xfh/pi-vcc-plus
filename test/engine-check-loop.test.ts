@@ -16,6 +16,9 @@
  *  8. Empty patch list still enforces the P4 cap.
  */
 import { describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { DEFAULTS } from "../src/config";
 import {
   __internals,
@@ -372,3 +375,99 @@ function silentLog() {
     void event;
   }) as unknown as import("../src/log").Logger;
 }
+
+describe("snapshot persistence (reload survival)", () => {
+  const { persistSnapshot, restoreSnapshot, _getSnapshot } = __internals;
+
+  const tmpCtx = (cwd: string, sessionId: string) => ({
+    cwd,
+    sessionManager: { getSessionId: () => sessionId },
+  });
+
+  let cwd: string;
+  const snapFile = () => join(cwd, ".pi", "vcc-plus", "last-snapshot.json");
+
+  test("persists a complete snapshot and restores it after cold start", () => {
+    cwd = mkdtempSync(join(tmpdir(), "vcc-snap-"));
+    try {
+      snapshotWith([VCC_TOOL]);
+      persistSnapshot(cwd, "sess-1");
+      expect(existsSync(snapFile())).toBe(true);
+      const stored = JSON.parse(readFileSync(snapFile(), "utf8"));
+      expect(stored.sessionId).toBe("sess-1");
+      expect(stored.tools).toEqual([VCC_TOOL]);
+
+      // Cold start: module state lost (e.g. /reload)
+      _testSetSnapshot(null);
+      expect(restoreSnapshot(tmpCtx(cwd, "sess-1"))).toBe(true);
+      const restored = _getSnapshot();
+      expect(restored?.tools).toEqual([VCC_TOOL]);
+      expect(restored?.toolsSource).toBe("persisted (restored after reload)");
+      expect(restored?.messages).toEqual(
+        [{ role: "user", content: "hi", timestamp: 0 }],
+      );
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("refuses a persisted snapshot from a different session", () => {
+    cwd = mkdtempSync(join(tmpdir(), "vcc-snap-"));
+    try {
+      snapshotWith([VCC_TOOL]);
+      persistSnapshot(cwd, "sess-1");
+      _testSetSnapshot(null);
+      expect(restoreSnapshot(tmpCtx(cwd, "sess-2"))).toBe(false);
+      expect(_getSnapshot()).toBeNull();
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("refuses incomplete or corrupt persisted snapshots", () => {
+    cwd = mkdtempSync(join(tmpdir(), "vcc-snap-"));
+    try {
+      // incomplete: written without tools (never happens via recordPayload,
+      // but the file must be validated on read)
+      persistSnapshot(cwd, "sess-1"); // snapshot has no tools -> no file
+      expect(existsSync(snapFile())).toBe(false);
+
+      // corrupt
+      mkdirSync(join(cwd, ".pi", "vcc-plus"), { recursive: true });
+      writeFileSync(snapFile(), "{not json", "utf8");
+      _testSetSnapshot(null);
+      expect(restoreSnapshot(tmpCtx(cwd, "sess-1"))).toBe(false);
+      expect(_getSnapshot()).toBeNull();
+
+      // tools stripped / mismatch status
+      writeFileSync(snapFile(), JSON.stringify({ sessionId: "sess-1", messages: [{ role: "user", content: "hi" }], tools: [] }), "utf8");
+      expect(restoreSnapshot(tmpCtx(cwd, "sess-1"))).toBe(false);
+      writeFileSync(snapFile(), JSON.stringify({ sessionId: "sess-1", messages: [{ role: "user", content: "hi" }], tools: [VCC_TOOL], toolsRoundTrip: "mismatch" }), "utf8");
+      expect(restoreSnapshot(tmpCtx(cwd, "sess-1"))).toBe(false);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("a fresh in-memory snapshot is never overwritten by the persisted one", () => {
+    cwd = mkdtempSync(join(tmpdir(), "vcc-snap-"));
+    try {
+      snapshotWith([VCC_TOOL]);
+      persistSnapshot(cwd, "sess-1");
+      // simulate a newer request having refreshed the in-memory snapshot
+      _testSetSnapshot({
+        messages: [{ role: "user", content: "newer", timestamp: 1 }],
+        systemPrompt: "sys2",
+        tools: [{ name: "x", description: "", parameters: {} }],
+        toolsSource: "before_provider_request.payload",
+        prefixTokens: 99,
+        at: 42,
+      });
+      expect(restoreSnapshot(tmpCtx(cwd, "sess-1"))).toBe(true);
+      expect(_getSnapshot()?.messages).toEqual([{ role: "user", content: "newer", timestamp: 1 }]);
+      expect(_getSnapshot()?.toolsSource).toBe("before_provider_request.payload");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+});

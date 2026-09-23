@@ -156,3 +156,6 @@ bun run test/draft-smoke.ts <session.jsonl> 0  # 用真实会话离线生成草�
    `checkPrefix` 在第 1 轮**必有**一行：验到与否都是可见状态
    （fetch 没被调用 / 没捕到 body / 无新鲜基线 → `identical: null` + `reason`）。
    双证据：字节层面（本条）+ 框架层面（`round.prefixSuspect` 的 cacheRead 断言）。
+6. **冷启动**：快照只存在于扩展观察到新 provider 请求之后。
+   `/reload`（或新会话）后立刻 `/compact` 会 fail-closed（取消 + 提示）——
+   先发一条普通消息（建立快照），再 `/compact` 即可。

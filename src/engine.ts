@@ -117,6 +117,9 @@ export function recordPayload(payload: Any, ctx: Any): void {
       JSON.stringify({ ts: Date.now(), pretty: JSON.stringify(payload, null, 2) }),
       "utf8",
     );
+    // Persist the now-complete snapshot so it survives /reload (module state
+    // dies with the process). Best-effort; the in-memory copy is authoritative.
+    persistSnapshot(cwd, safeSessionId(ctx));
   } catch {
     /* baseline is optional evidence, not part of the request path */
   }
@@ -127,6 +130,78 @@ function safeSystemPrompt(ctx: Any): string {
     return ctx?.getSystemPrompt?.() ?? "";
   } catch {
     return "";
+  }
+}
+
+const SNAPSHOT_FILE = "last-snapshot.json";
+
+/**
+ * Persist the complete snapshot (agent-format messages + system prompt +
+ * normalized tools + raw wire tools) so it survives /reload — module state
+ * dies with the process, but /compact right after a reload must still be
+ * able to reuse the last request's prefix. Called from recordPayload, so the
+ * file always mirrors the last request the extension observed.
+ */
+export function persistSnapshot(cwd: string | undefined, sessionId: string | undefined): void {
+  const s = snapshot;
+  if (!s?.tools?.length) return; // only complete snapshots (tools included)
+  if (typeof cwd !== "string" || typeof sessionId !== "string") return;
+  try {
+    const dir = join(cwd, ".pi", "vcc-plus");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, SNAPSHOT_FILE),
+      JSON.stringify({
+        ts: s.at,
+        sessionId,
+        messages: s.messages,
+        systemPrompt: s.systemPrompt,
+        tools: s.tools,
+        toolsSource: s.toolsSource,
+        wireTools: s.wireTools,
+        toolsRoundTrip: s.toolsRoundTrip,
+        prefixTokens: s.prefixTokens,
+      }),
+      "utf8",
+    );
+  } catch {
+    /* best effort — the in-memory snapshot stays authoritative */
+  }
+}
+
+/**
+ * Cold-start recovery. After /reload (or in a fresh process for a resumed
+ * session) the in-memory snapshot is gone until the next provider request.
+ * If no complete in-memory snapshot exists, restore the last persisted one —
+ * only when it belongs to this session and is complete (messages + tools
+ * present, round-trip status not "mismatch"). Anything else fails closed.
+ */
+export function restoreSnapshot(ctx: Any): boolean {
+  if (snapshot?.tools?.length) return true; // already complete
+  const cwd = typeof ctx?.cwd === "string" ? ctx.cwd : undefined;
+  const sessionId = safeSessionId(ctx);
+  if (!cwd || !sessionId) return false;
+  const path = join(cwd, ".pi", "vcc-plus", SNAPSHOT_FILE);
+  try {
+    if (!existsSync(path)) return false;
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as Any;
+    if (parsed?.sessionId !== sessionId) return false; // other session in this cwd
+    if (!Array.isArray(parsed.messages) || parsed.messages.length === 0) return false;
+    if (!Array.isArray(parsed.tools) || parsed.tools.length === 0) return false;
+    if (parsed.toolsRoundTrip === "mismatch") return false;
+    snapshot = {
+      messages: parsed.messages,
+      systemPrompt: typeof parsed.systemPrompt === "string" ? parsed.systemPrompt : "",
+      tools: parsed.tools,
+      toolsSource: "persisted (restored after reload)",
+      wireTools: Array.isArray(parsed.wireTools) ? parsed.wireTools : undefined,
+      toolsRoundTrip: parsed.toolsRoundTrip,
+      prefixTokens: typeof parsed.prefixTokens === "number" ? parsed.prefixTokens : 0,
+      at: typeof parsed.ts === "number" ? parsed.ts : 0,
+    };
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -776,16 +851,31 @@ export async function onBeforeCompact(event: Any, ctx: Any, cfg: Config): Promis
   }
 
   if (!snapshot?.messages?.length) {
+    // Cold start: module state died with the previous process (e.g. /reload).
+    // Reuse the last complete snapshot persisted for this session, if one
+    // exists; otherwise fall through to the fail-closed check below.
+    if (restoreSnapshot(ctx)) {
+      log("snapshot_restored", {
+        at: snapshot?.at ?? 0,
+        tools: snapshot?.tools?.length ?? 0,
+        toolsRoundTrip: snapshot?.toolsRoundTrip,
+      });
+    }
+  }
+
+  if (!snapshot?.messages?.length) {
     // Without the last-request snapshot the check request cannot reuse the
     // prefix at all (no system prompt, no tools) — fail closed instead of
     // sending a one-message request that silently abandons the design.
+    // Remaining trigger: a brand-new session with no provider request yet
+    // (nothing persisted to restore).
     log("abort", { why: "no snapshot of the last provider request yet" });
     return fail(
       cfg,
       ctx,
       log,
       reason,
-      "no snapshot of the last provider request yet; compaction cannot reuse the prefix",
+      "no snapshot of the last provider request yet (nothing persisted to restore either). Send one normal message first, then run /compact again",
       prep,
     );
   }
@@ -876,7 +966,14 @@ function fail(cfg: Config, ctx: Any, log: Logger, reason: string, message: strin
     throw new Error(`vcc-plus: ${bare}`);
   }
   log("fail_closed", { mode: "cancel", message });
-  if (ctx?.hasUI) ctx.ui.notify(`vcc-plus: compaction check failed; this compaction was cancelled (${message})`, "warning");
+  if (ctx?.hasUI) {
+    ctx.ui.notify(
+      message.includes("no snapshot of the last provider request")
+        ? "vcc-plus: no provider-request snapshot yet — send one normal message, then run /compact again"
+        : `vcc-plus: compaction check failed; this compaction was cancelled (${message})`,
+      "warning",
+    );
+  }
   return { cancel: true };
 }
 
@@ -905,10 +1002,13 @@ export const __internals = {
   extractSection,
   runCheckLoop,
   fail,
+  persistSnapshot,
+  restoreSnapshot,
   _testSetPhase: (p: Phase | null) => {
     phase = p;
   },
   _testSetSnapshot: (s: Snapshot | null) => {
     snapshot = s;
   },
+  _getSnapshot: (): Snapshot | null => snapshot,
 };
