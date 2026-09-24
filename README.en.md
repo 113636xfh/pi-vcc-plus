@@ -140,7 +140,12 @@ So the summary is finalized mechanically (`src/finalize.ts`, **no model
 cooperation required**):
 
 - drop every transcript block, `---` separator line, `vcc_recall` note and
-  `...(N earlier lines omitted)` marker;
+  `...(N earlier lines omitted)` marker; the prompt therefore no longer asks
+  the model to delete the transcript line by line (7 KB of `oldText` output
+  spent for nothing, and P1 exact-match failures on quoted prose) — it only
+  says the transcript is stripped automatically and is source material; the
+  P4 cap is measured on the finalized text too, so a transcript cannot push
+  a draft over the budget;
 - normalize the sections to the fixed set of eight, in a fixed order:
   `[Session Goal]`, `[Files And Changes]`, `[Commits]`, `[Key Decisions]`,
   `[Environment]`, `[Results]`, `[Outstanding Context]`, `[User Preferences]`;

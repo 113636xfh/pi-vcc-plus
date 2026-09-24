@@ -97,6 +97,35 @@ describe("applyChanges", () => {
     expect(result.error).toContain("over the cap");
   });
 
+  test("the cap measures the finalized summary, not the draft's transcript", () => {
+    // A draft whose transcript (which the model must not spend patches on and
+    // which is stripped mechanically) pushes the raw draft over the cap still
+    // accepts patches: what pi receives is the finalized form.
+    const draft = [
+      "[Session Goal]",
+      "- g",
+      "",
+      "---",
+      "",
+      "[assistant]",
+      `* bash "${"y".repeat(4000)}" (#1)`,
+      "",
+      "Use `vcc_recall` to search for prior work, decisions, and context from before this summary. Do not redo work already completed.",
+    ].join("\n");
+    const result = applyChanges({
+      draft,
+      changes: [{ oldText: "- g", newText: "- g second" }],
+      capTokens: 200,
+      charsPerToken: 4,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.text).toContain("- g second");
+    // the receipt reports the finalized size, well under the cap
+    expect(result.receipt).toContain("/ cap 200");
+    expect(result.receipt).not.toContain("over the cap");
+  });
+
   test("rejects empty oldText and empty change lists are a no-op", () => {
     const empty = apply([{ oldText: "", newText: "x" }]);
     expect(empty.ok).toBe(false);

@@ -31,7 +31,7 @@ describe("buildTailInstruction", () => {
       "[Session Goal], [Files And Changes], [Commits], [Key Decisions], [Environment],\n  [Results], [Outstanding Context], [User Preferences]",
     );
     expect(text).toContain("That transcript is raw material, not output");
-    expect(text).toContain("DELETE every transcript line");
+    expect(text).toContain("Do NOT spend patches on it");
     expect(text).toContain("Do not rename, merge or reorder them, and never invent another header");
     expect(text).toContain("one fact per line, no prose paragraphs");
     expect(text).toContain("Preserve exact file paths, commands, PIDs, ports, and error messages");

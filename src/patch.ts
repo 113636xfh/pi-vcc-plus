@@ -10,6 +10,7 @@ import {
   ERR_SECTION,
   buildDiffReceipt,
 } from "./prompt";
+import { finalizeSummary } from "./finalize";
 
 export interface Change {
   oldText: string;
@@ -32,6 +33,16 @@ export interface Rejected {
 
 export const tokensOf = (text: string, charsPerToken: number): number =>
   Math.ceil((text?.length ?? 0) / (charsPerToken || 4));
+
+/**
+ * The token count the budget is about: what pi actually receives is the
+ * finalized summary (the draft's mechanical transcript, separators and
+ * vcc_recall note are stripped by finalizeSummary). Counting the raw draft
+ * would let a transcript the model must not spend patches on push a draft over
+ * the cap, and would reject patches for a summary that fits.
+ */
+export const effectiveTokensOf = (text: string, charsPerToken: number): number =>
+  tokensOf(finalizeSummary(text).text, charsPerToken);
 
 export const SECTION_RE = /^\[[^\]]+\]\s*$/;
 
@@ -75,7 +86,7 @@ export function applyChanges(args: {
   if (changes.length === 0) {
     // P4 applies to no-op patches too: an empty patch list must not paper over
     // a draft that is already over the cap.
-    const tokens = tokensOf(draft, charsPerToken);
+    const tokens = effectiveTokensOf(draft, charsPerToken);
     if (tokens > capTokens) return { ok: false, error: ERR_OVER_CAP(tokens, capTokens) };
     return {
       ok: true,
@@ -141,7 +152,8 @@ export function applyChanges(args: {
   }
 
   // P4: the merged summary must stay within pi's own summarization budget.
-  const afterTokens = tokensOf(text, charsPerToken);
+  // Measured on the finalized form (see effectiveTokensOf).
+  const afterTokens = effectiveTokensOf(text, charsPerToken);
   if (afterTokens > capTokens) return { ok: false, error: ERR_OVER_CAP(afterTokens, capTokens) };
 
   const grouped = new Map<string, { name: string; removed: string[]; added: string[] }>();

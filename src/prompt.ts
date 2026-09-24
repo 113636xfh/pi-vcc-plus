@@ -26,9 +26,10 @@ ${draft}
 [Format] The draft has two parts: the [Section] blocks, and below them a mechanical
 transcript of the turns being replaced (lines like [user], [assistant], [tool],
 * tool "..." (#123), the "---" separators and a trailing "Use vcc_recall ..." note).
-- That transcript is raw material, not output. Fold what the summary needs into the
-  sections, then DELETE every transcript line, every "---" separator line and the
-  vcc_recall note: the finalized summary must contain nothing but the section blocks.
+- That transcript is raw material, not output: mine it for facts and put them in the
+  right section. Do NOT spend patches on it, on the "---" lines or on the vcc_recall
+  note: a mechanical pass drops all of them after you finish, so the finalized summary
+  holds the section blocks and nothing else.
 - Emit exactly these sections, in this order and with these names:
   [Session Goal], [Files And Changes], [Commits], [Key Decisions], [Environment],
   [Results], [Outstanding Context], [User Preferences].

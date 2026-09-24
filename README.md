@@ -94,6 +94,8 @@ git commit -m "bump pi-vcc"
 所以定稿前做一次机械剥离（`src/finalize.ts`，**不依赖模型配合**）：
 
 - 丢掉所有转录块、`---` 分隔行、`vcc_recall` 提示与 `...(N earlier lines omitted)` 标记；
+  提示词因此**不再要求模型逐行删除转录区**（那是 7K 字符的 `oldText` 白烧输出 token，还容易 P1 匹配失败），
+  只说"转录区自动剥离、只当原料"；P4 上限也改成按**剥离后**的正文计（否则转录会把草稿顶过上限）；
 - 章节名归一到固定 8 个并按固定顺序输出：`[Session Goal]`、`[Files And Changes]`、`[Commits]`、
   `[Key Decisions]`、`[Environment]`、`[Results]`、`[Outstanding Context]`、`[User Preferences]`；
   别名（`[Outstanding]`）改名，自造标题（`[Root Cause: …]`）按关键词并入最合适的章节（内容不丢）；

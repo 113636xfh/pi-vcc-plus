@@ -12,7 +12,7 @@ import { convertToLlm } from "@earendil-works/pi-coding-agent";
 import { type Config } from "./config";
 import { createLogger, type Logger } from "./log";
 import { finalizeSummary } from "./finalize";
-import { applyChanges, SECTION_RE, tokensOf, type Change } from "./patch";
+import { applyChanges, effectiveTokensOf, SECTION_RE, tokensOf, type Change } from "./patch";
 import {
   ERR_DRAFT_READ_CAP,
   ERR_RECALL_IN_CHECK,
@@ -633,7 +633,10 @@ export function toolDraft(params: Any): ToolOutcome {
   }
   phase.guard.draftReads += 1;
   const body = section ? extractSection(phase.draft, section) : phase.draft;
-  return text(`${draftHeader(tokensOf(phase.draft, phase.charsPerToken), phase.capTokens)}\n\n${body}`);
+  // The budget is about the finalized summary (the transcript is stripped), so
+  // report that number rather than the raw draft size.
+  const shown = effectiveTokensOf(phase.draft, phase.charsPerToken);
+  return text(`${draftHeader(shown, phase.capTokens)}\n\n${body}`);
 }
 
 export function toolDone(): ToolOutcome {
@@ -759,7 +762,7 @@ async function runCheckLoop(args: {
   // outgoing body, which is then compared against the previous real
   // request's wire body (sentinel baseline, else our own capture).
   const checkCapture: { url?: string; bodyText?: string } = {};
-  const draftTokens = tokensOf(phase!.draft, charsPerToken);
+  const draftTokens = effectiveTokensOf(phase!.draft, charsPerToken);
   const instruction = buildTailInstruction({
     draft: phase!.draft,
     capTokens,
@@ -1079,7 +1082,7 @@ export async function onBeforeCompact(event: Any, ctx: Any, cfg: Config): Promis
   try {
     if (ctx.hasUI) {
       ctx.ui.notify(
-        `vcc-plus: checking compaction draft (draft ${tokensOf(draft, charsPerToken)} tokens / cap ${capTokens})`,
+        `vcc-plus: checking compaction draft (draft ${effectiveTokensOf(draft, charsPerToken)} tokens / cap ${capTokens})`,
         "info",
       );
     }
