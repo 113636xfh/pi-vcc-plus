@@ -116,8 +116,16 @@ export const ERR_DRAFT_READ_CAP = (max: number): string =>
 export const ERR_REPEAT_HINT =
   "The same oldText failed twice; include the neighbouring line(s) with the anchor, or use a longer exact excerpt.";
 export const TOOL_DONE_OK = "Finalized.";
-export const draftHeader = (tokens: number, cap: number): string =>
-  `Current draft: ${tokens} tokens / cap ${cap} tokens`;
+/**
+ * The draft body handed to the model is the raw draft (sections + the
+ * mechanical transcript, kept as source material), while the budget only counts
+ * what the finalized summary will contain. Report both so the two numbers in
+ * front of the model are not contradictory.
+ */
+export const draftHeader = (tokens: number, cap: number, rawTokens?: number): string =>
+  rawTokens !== undefined && rawTokens !== tokens
+    ? `Current draft: ${rawTokens} tokens shown (${tokens} tokens after the mechanical strip of the transcript) / cap ${cap} tokens`
+    : `Current draft: ${tokens} tokens / cap ${cap} tokens`;
 
 /** Tool descriptions: kept short and stable (they live in the prefix from session start). */
 export const DESC_VCC_PATCH = `Correct the compaction draft. Only usable during the compaction check; calls in normal turns are rejected. Same usage as the edit tool: exact, unique oldText → newText; newText: "" deletes.`;

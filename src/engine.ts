@@ -634,9 +634,10 @@ export function toolDraft(params: Any): ToolOutcome {
   phase.guard.draftReads += 1;
   const body = section ? extractSection(phase.draft, section) : phase.draft;
   // The budget is about the finalized summary (the transcript is stripped), so
-  // report that number rather than the raw draft size.
+  // report that number next to the raw size of what is actually shown.
   const shown = effectiveTokensOf(phase.draft, phase.charsPerToken);
-  return text(`${draftHeader(shown, phase.capTokens)}\n\n${body}`);
+  const raw = tokensOf(phase.draft, phase.charsPerToken);
+  return text(`${draftHeader(shown, phase.capTokens, raw)}\n\n${body}`);
 }
 
 export function toolDone(): ToolOutcome {
