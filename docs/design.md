@@ -65,7 +65,8 @@ fail-closed 的边界（全部在 `src/engine.ts`）：
 | 没有内存快照（`/reload` / 新进程 / 新项目） | 先读同会话的持久化快照（`restoreSnapshot`，同会话+完整+非 mismatch）；没读到则 `rebuildSnapshotFromSession` 从会话自身重建（messages 取 `buildSessionProjection()` → `convertToLlm` → blockImages，system 取 `ctx.getSystemPrompt()`，tools 取 `pi.getAllTools()` 的活跃项），记 `snapshot_rebuilt`；tools 拿不到或会话为空才抛错（没有 tools 模型无法调 `vcc_delete` / `vcc_add`） |
 | 还没有任何快照且会话也重建不出（空会话 / ctx 未暴露 projection / 无 tools） | 走失败策略——单条消息请求没有 system/tools，前缀复用直接作废 |
 | 模型全程没调 `vcc_done` | 默认：警告 + 接受当前草稿（只被 P4 校验过的补丁改过，状态安全）；`guards.requireDone: true` 时升级为失败 |
-| 空 `changes` 补丁 | 同样过 P4 上限检查（不放过已超限的草稿） |
+| 空补丁列表 | 同样过预算检查（不放过已超限的草稿） |
+| 检查请求超出 provider 上下文窗口（`onContextOverflow: "trim"`） | 用 provider 的真实数字反推 chars/token（pi 的 `chars/4` 估算在中文内容上偏乐观 ~1.8×，实测 178,397 vs 322,385），丢掉最旧的快照消息使请求装得下，记 `check_trimmed`，重试一次；重试仍超窗 → `draftFallback`（记 `overflow_fallback`，UI 警告）；`"draft"` 直接走草稿，`"fail"` 不做特殊处置 |
 | 模型删到章节标题 / 转录区行号 | 拒绝并给原因（标题是结构；转录区只读、只当原料） |
 
 手动 `/compact <instructions>` 的 `customInstructions` 会拼进尾部指令（只影响前缀之后的内容，不影响缓存）。

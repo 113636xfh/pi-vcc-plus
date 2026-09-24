@@ -223,6 +223,7 @@ source**; we never modify it):
   "fallbackToNative": false,
   "upstreamRecallTool": true,
   "alignCheckParams": true,
+  "onContextOverflow": "trim",
   "debugLog": true,
   "systemBlock": "<pi-vcc-plus>…</pi-vcc-plus>"
 }
@@ -252,6 +253,23 @@ source**; we never modify it):
   vLLM + LMCache — flipping `enable_thinking` only moves the tail by 2 tokens
   and the hit stayed); check rounds then skip thinking and run much faster.
   Re-verify with `round.prefixSuspect` or `node scripts/log-rounds.mjs`;
+- `onContextOverflow: "trim"` = what to do when the check request exceeds
+  the provider's context window. **Why that happens**: pi 0.87 estimates context
+  tokens as `chars/4` (`dist/core/compaction/compaction.js`), while Chinese-heavy
+  content really needs ~**2.2 chars/token** — measured on one session: pi
+  estimated **178,397**, the provider counted **322,385** (**1.81x**), so pi
+  compacted too late and the provider rejected the real request first (llama.cpp:
+  `request (322385 tokens) exceeds the available context size (262144 tokens)`).
+  `trim` (default) = derive the true chars/token from the provider's own numbers,
+  keep the newest slice that fits (the older part is what the draft already
+  summarizes) and retry once; if that overflows too, finalize with the
+  **mechanical draft** (the alternative is a session that can no longer compact);
+  `draft` = skip the retry and use the draft right away (fastest, handy when the
+  provider is slow or down); `fail` = no special handling, follow `onFailure`
+  (fail closed). Note the premise: when the context itself is over the window the
+  previous request was already rejected, so there is no cached prefix to reuse
+  and "one prefill only" cannot apply; both degradations log
+  (`check_trimmed` / `overflow_fallback`) and warn in the UI, never silently;
 - the config is read once when the extension loads; change `config.json` with
   `/reload` (changing it mid-session would change the system block and break
   the prefix invariant);

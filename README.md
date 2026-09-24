@@ -158,6 +158,7 @@ pi install "<repo-dir>"
   "fallbackToNative": false,
   "upstreamRecallTool": true,
   "alignCheckParams": true,
+  "onContextOverflow": "trim",
   "debugLog": true,
   "systemBlock": "<pi-vcc-plus>…</pi-vcc-plus>"
 }
@@ -177,6 +178,15 @@ pi install "<repo-dir>"
   仅用「缓存键只由 prompt token 决定」的后端（实测 vLLM + LMCache：翻转 `enable_thinking` 只改尾部
   2 token，命中照旧）时可以关掉，检查轮不思考、快得多；改完用 `round.prefixSuspect`
   或 `node scripts/log-rounds.mjs` 复核；
+- `onContextOverflow: "trim"` = 检查请求超出 provider 上下文窗口时的处置。**为何会有这种情况**：pi 0.87 的
+  上下文估算写死 `chars/4`（`dist/core/compaction/compaction.js`），而中文为主的内容实际约 **2.2 字符/token**——
+  实测同一会话 pi 估 **178,397**、服务端算出 **322,385**（**1.81×**），于是 pi 压缩触发太晚、真实请求先被
+  provider 400（llama.cpp：`request (322385 tokens) exceeds the available context size (262144 tokens)`）。
+  `trim`（默认）= 用 provider 给的真实数字反推 chars/token，保留能装下的最新一段（旧的那段本来就在草稿里）
+  重试一次；重试仍超窗则用**机械草稿**定稿（否则这个会话就彻底压不动了）；`draft` = 不重试，直接走草稿定稿
+  （最快，适合 provider 慢/挂着）；`fail` = 不做特殊处置，按 `onFailure` fail-closed。
+  前提说明：会话本身超窗时，上一次请求已被拒，服务端本来就没有可复用前缀，所以「只 prefill 一次」在此场景不适用；
+  两种降级都写 `check_trimmed` / `overflow_fallback` 日志 + UI 警告（非静默）；
 - 配置只在扩展加载时读一次；改 `config.json` 需 `/reload`（中途改会改变系统块、破坏前缀不变量）；
 - 草稿的 chars/token 校准沿用上游 `before-compact.ts` 的锚（span 字符 + 上次摘要字符 ÷ `tokensBefore`）：
   这是上游算法的行为（对估算偏保守），我们刻意保持一致、不单方分叉。

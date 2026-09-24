@@ -376,6 +376,14 @@ function silentLog() {
   }) as unknown as import("../src/log").Logger;
 }
 
+/** A Logger that records the events (used to assert what got logged). */
+function collectingLog(events: Array<[string, Record<string, unknown>]>) {
+  const fn = ((event: string, data: Record<string, unknown> = {}) => {
+    events.push([event, data]);
+  }) as unknown as import("../src/log").Logger;
+  return fn;
+}
+
 describe("snapshot persistence (reload survival)", () => {
   const { persistSnapshot, restoreSnapshot, _getSnapshot } = __internals;
 
@@ -469,5 +477,160 @@ describe("snapshot persistence (reload survival)", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
+  });
+});
+
+describe("context overflow (pi estimates chars/4, the provider counts the real tokens)", () => {
+  const LLAMA_400 =
+    'error: 400: {"code":400,"message":"request (322385 tokens) exceeds the available context size (262144 tokens), try increasing it","type":"exceed_context_size_error","n_prompt_tokens":322385,"n_ctx":262144}';
+
+  test("parses the provider's numbers across backends", () => {
+    const { parseOverflowError } = __internals;
+    expect(parseOverflowError(LLAMA_400)).toEqual({ tokens: 322385, limit: 262144 });
+    expect(parseOverflowError("This model's maximum context length is 262144 tokens")).toEqual({
+      tokens: null,
+      limit: 262144,
+    });
+    expect(parseOverflowError("429 rate limit")).toBeNull();
+  });
+
+  test("trims to the newest slice that fits, keeping at least two messages", () => {
+    const { trimCheckMessages } = __internals;
+    const messages = Array.from({ length: 10 }, (_, i) => ({ role: "user", content: `m${i} ${"x".repeat(1000)}` }));
+    const sentChars = JSON.stringify(messages).length;
+    // the provider counted 1/2 of pi's chars: 5000 chars -> 2500 tokens
+    const out = trimCheckMessages({
+      messages,
+      sentChars,
+      reportedTokens: Math.ceil(sentChars / 2),
+      limitTokens: 2000,
+      reserveTokens: 200,
+      draftTokens: 100,
+    });
+    expect(out.messages.length).toBeGreaterThanOrEqual(2);
+    expect(out.messages.length).toBeLessThan(messages.length);
+    expect(out.messages.at(-1)).toBe(messages.at(-1));
+    const keptChars = JSON.stringify(out.messages).length;
+    expect(keptChars).toBeLessThanOrEqual(Number(out.report.keepChars));
+    expect(Number(out.report.charsPerToken)).toBeCloseTo(2, 1);
+    expect(out.report.dropped).toBe(messages.length - out.messages.length);
+  });
+
+  test("retries once with a trimmed request, then finishes normally", async () => {
+    _testSetPhase(freshPhase(DRAFT));
+    snapshotWith([VCC_TOOL]);
+    const snapshot = __internals._getSnapshot()!;
+    snapshot.messages = Array.from({ length: 20 }, (_, i) => ({
+      role: "user",
+      content: `msg ${i} ${"x".repeat(2000)}`,
+      timestamp: i,
+    }));
+    const responses = [
+      assistant([], "error", LLAMA_400),
+      assistant([doneCall], "stop"),
+    ];
+    let i = 0;
+    const seen: number[] = [];
+    const ctx: any = {
+      hasUI: false,
+      ui: { notify: () => {} },
+      modelRegistry: {
+        complete: async (_m: unknown, context: any) => {
+          seen.push(context.messages.length);
+          return responses[i++];
+        },
+      },
+    };
+    const events: Array<[string, Record<string, unknown>]> = [];
+    const result = await runCheckLoop({
+      ctx,
+      model: { maxTokens: 4096, contextWindow: 262144 },
+      cfg: cfg(),
+      signal: undefined,
+      capTokens: 10_000,
+      charsPerToken: 4,
+      reserveTokens: 16384,
+      log: collectingLog(events),
+    });
+    expect(result.rounds).toBe(1);
+    expect(seen.length).toBe(2); // original + retry
+    expect(seen[1]).toBeLessThan(seen[0]);
+    const trimmed = events.find(([name]) => name === "check_trimmed");
+    expect(trimmed).toBeDefined();
+    expect(Number(trimmed![1].limitTokens)).toBe(262144);
+    _testSetPhase(null);
+    _testSetSnapshot(null);
+  });
+
+  test("overflow again after the retry → a marked error for the draft fallback", async () => {
+    _testSetPhase(freshPhase(DRAFT));
+    snapshotWith([VCC_TOOL]);
+    const ctx: any = {
+      hasUI: false,
+      ui: { notify: () => {} },
+      modelRegistry: { complete: async () => assistant([], "error", LLAMA_400) },
+    };
+    const events: Array<[string, Record<string, unknown>]> = [];
+    const error: any = await runCheckLoop({
+      ctx,
+      model: { maxTokens: 4096, contextWindow: 262144 },
+      cfg: cfg(),
+      signal: undefined,
+      capTokens: 10_000,
+      charsPerToken: 4,
+      reserveTokens: 16384,
+      log: collectingLog(events),
+    }).catch((thrown: any) => thrown);
+    expect(String(error?.message)).toContain("does not fit the provider's context window");
+    expect(error?.overflow).toEqual({ tokens: 322385, limit: 262144 });
+    // it trimmed once, then gave up (the caller turns this into the draft fallback)
+    expect(events.some(([name]) => name === "check_trimmed")).toBe(true);
+    _testSetPhase(null);
+    _testSetSnapshot(null);
+  });
+
+  test("draftFallback compacts with the finalized mechanical draft and is visible", () => {
+    _testSetPhase(freshPhase(DRAFT));
+    const events: Array<[string, Record<string, unknown>]> = [];
+    const notes: string[] = [];
+    const result = __internals.draftFallback(
+      { hasUI: true, ui: { notify: (m: string) => notes.push(m) } },
+      collectingLog(events),
+      "overflow_fallback",
+      "the check request cannot fit the provider's context window; compacting with the mechanical draft (unchecked)",
+      { firstKeptEntryId: "entry-1", tokensBefore: 1234 },
+    );
+    expect(result?.compaction.summary).toContain("[Session Goal]");
+    expect(result?.compaction.firstKeptEntryId).toBe("entry-1");
+    expect(events.some(([name]) => name === "overflow_fallback")).toBe(true);
+    expect(events.some(([name]) => name === "finalize")).toBe(true);
+    expect(notes.join(" ")).toContain("mechanical draft");
+    _testSetPhase(null);
+  });
+
+  test("onContextOverflow: \"fail\" keeps the old fail-closed behaviour", async () => {
+    _testSetPhase(freshPhase(DRAFT));
+    snapshotWith([VCC_TOOL]);
+    const config = cfg();
+    config.onContextOverflow = "fail";
+    const ctx: any = {
+      hasUI: false,
+      ui: { notify: () => {} },
+      modelRegistry: { complete: async () => assistant([], "error", LLAMA_400) },
+    };
+    await expect(
+      runCheckLoop({
+        ctx,
+        model: { maxTokens: 4096, contextWindow: 262144 },
+        cfg: config,
+        signal: undefined,
+        capTokens: 10_000,
+        charsPerToken: 4,
+        reserveTokens: 16384,
+        log: silentLog(),
+      }),
+    ).rejects.toThrow(/check request did not succeed/);
+    _testSetPhase(null);
+    _testSetSnapshot(null);
   });
 });

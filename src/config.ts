@@ -47,6 +47,24 @@ export interface Config {
   /** Register pi-vcc's own vcc_recall tool (read-only history search). */
   upstreamRecallTool: boolean;
   /**
+   * What to do when the check request does not fit the provider's context
+   * window (measured: pi estimates context tokens as chars/4, so a
+   * Chinese-heavy session can be ~1.8x larger than pi thinks and the provider
+   * returns a context-overflow 400).
+   *
+   * trim  (default) = retry once with the newest part of the snapshot that fits
+   *   (the earlier part is what the draft already summarizes); if that also
+   *   overflows, compact with the mechanical draft instead of failing.
+   * draft = skip the retry, compact with the mechanical draft right away
+   *   (instant; useful when the provider is slow or down).
+   * fail  = no special handling; the failure follows `onFailure` (fail closed).
+   *
+   * Rationale: when the context itself is over the window, the provider already
+   * rejected the previous request, so there is no cached prefix to reuse and
+   * the alternative to compacting is a session that can no longer run.
+   */
+  onContextOverflow: "trim" | "draft" | "fail";
+  /**
    * true (default) = the check request re-sends the last real request's
    * request-level parameters (chat_template_kwargs, max_tokens, ...) so the
    * provider sees the same rendering and the same cache key.
@@ -106,6 +124,7 @@ export const DEFAULTS: Config = {
   fallbackToNative: false,
   upstreamRecallTool: true,
   alignCheckParams: true,
+  onContextOverflow: "trim",
   debugLog: true,
   systemBlock: SYSTEM_BLOCK,
 };

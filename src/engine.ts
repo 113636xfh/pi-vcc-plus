@@ -707,6 +707,78 @@ export function keptTurnStats(ctx: Any, prep: Any): { keepRecentTokens: number; 
 }
 
 /**
+ * Provider context-overflow errors, across backends:
+ *   llama.cpp: request (322385 tokens) exceeds the available context size (262144 tokens)
+ *   vLLM:      The engine prompt is too long / maximum context length is N tokens
+ *   OpenAI:    This model's maximum context length is N tokens
+ * Only parsed when the provider rejected the prompt for length; the numbers are
+ * what makes the follow-up (trim to fit) possible.
+ */
+export function parseOverflowError(message: string): { tokens: number | null; limit: number | null } | null {
+  const text = String(message ?? "");
+  if (!/context|too long|too many tokens|n_prompt_tokens/i.test(text)) return null;
+  const tokens = Number(
+    /(?:request \(|n_prompt_tokens"?\s*[:=]\s*|\(\s*)(\d{3,})\s*tokens?/.exec(text)?.[1] ?? NaN,
+  );
+  const limit = Number(
+    /(?:available context size|maximum context length|context (?:size|window)|max_model_len)\(?\s*(\d{3,})/.exec(text)?.[1] ??
+      /(?:available context size|maximum context length|context (?:size|window)|max_model_len)[^\d]{0,20}(\d{3,})/i.exec(
+        text,
+      )?.[1] ??
+      NaN,
+  );
+  if (!Number.isFinite(tokens) && !Number.isFinite(limit)) return null;
+  return {
+    tokens: Number.isFinite(tokens) ? tokens : null,
+    limit: Number.isFinite(limit) ? limit : null,
+  };
+}
+
+/**
+ * Cut the check request down to the newest part that fits the provider's window.
+ *
+ * The provider's own counts give the true chars-per-token ratio for this content
+ * (pi's own estimate is chars/4, which a Chinese-heavy session beats by ~1.8x),
+ * so the budget is converted back into the measure we can slice by. Always keeps
+ * the newest messages, and at least two of them: the point is to still have the
+ * model write the summary of a session whose context no longer fits anywhere.
+ */
+export function trimCheckMessages(args: {
+  messages: Any[];
+  sentChars: number;
+  reportedTokens: number;
+  limitTokens: number;
+  reserveTokens: number;
+  draftTokens: number;
+}): { messages: Any[]; report: Record<string, unknown> } {
+  const { messages, sentChars, reportedTokens, limitTokens, reserveTokens, draftTokens } = args;
+  const ratio = reportedTokens > 0 ? sentChars / reportedTokens : 4;
+  const budget = Math.max(1, limitTokens - reserveTokens - draftTokens);
+  const keepChars = Math.floor(budget * ratio * 0.9); // 10% safety margin
+  const sizes = messages.map((m) => roughChars([m]) + 1);
+  const kept: Any[] = [];
+  let chars = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (kept.length >= 2 && chars + sizes[i] > keepChars) break;
+    kept.unshift(messages[i]);
+    chars += sizes[i];
+  }
+  return {
+    messages: kept,
+    report: {
+      dropped: messages.length - kept.length,
+      kept: kept.length,
+      charsPerToken: Number(ratio.toFixed(3)),
+      keepChars,
+      sentChars,
+      reportedTokens,
+      limitTokens,
+      budget,
+    },
+  };
+}
+
+/**
  * The assistant message that closed the last real request — the reply the
  * server already generated and already holds in its slot KV. The check
  * request appends it between the snapshot and the tail instruction so the
@@ -829,6 +901,8 @@ async function runCheckLoop(args: {
     ...(continuation ? [continuation] : []),
     { role: "user", content: [{ type: "text", text: instruction }], timestamp: Date.now() },
   ];
+  /** A context-overflow retry may replace `messages` once (see the loop). */
+  let trimmed = false;
   if (continuation) log("continuation", { appended: true });
 
   const tools = snapshot?.tools;
@@ -898,6 +972,45 @@ async function runCheckLoop(args: {
       response?.errorMessage
     ) {
       const detail = response?.errorMessage ? `: ${String(response.errorMessage).slice(0, 300)}` : "";
+      const overflow = parseOverflowError(String(response?.errorMessage ?? ""));
+      if (overflow && cfg.onContextOverflow !== "fail") {
+        // The context itself is over the provider's window (pi estimates chars/4,
+        // a Chinese-heavy session is ~1.8x bigger, so pi compacts too late and
+        // the provider rejects the request). There is no cached prefix to reuse
+        // in that state, and refusing to compact would leave the session unable
+        // to run at all: retry once with the newest slice that fits, else fall
+        // back to the mechanical draft (in the caller).
+        if (cfg.onContextOverflow === "trim" && !trimmed) {
+          const sentChars = roughChars(messages);
+          const limitTokens = overflow.limit ?? (model?.contextWindow > 0 ? model.contextWindow : 0);
+          if (limitTokens > 0) {
+            const trimmedRequest = trimCheckMessages({
+              messages,
+              sentChars,
+              reportedTokens: overflow.tokens ?? Math.ceil(sentChars / charsPerToken),
+              limitTokens,
+              reserveTokens,
+              draftTokens,
+            });
+            log("check_trimmed", trimmedRequest.report);
+            if (ctx?.hasUI) {
+              ctx.ui.notify(
+                `vcc-plus: the check request is over the provider's context (${overflow.tokens ?? "?"} > ${limitTokens} tokens); retrying with the last ${trimmedRequest.messages.length} messages`,
+                "warning",
+              );
+            }
+            messages.length = 0;
+            messages.push(...trimmedRequest.messages);
+            trimmed = true;
+            continue;
+          }
+        }
+        const error = new Error(
+          `vcc-plus: the check request does not fit the provider's context window (${overflow.tokens ?? "?"} prompt tokens vs a limit of ${overflow.limit ?? "?"}). pi estimated this session at ${tokensOf(phase!.draft, charsPerToken)} draft tokens plus the snapshot and uses chars/4 for context estimates, which under-counts non-Latin text: raise the provider's context size, or set onContextOverflow ("trim" / "draft") to compact with a smaller request or with the mechanical draft`,
+        );
+        (error as Any).overflow = overflow;
+        throw error;
+      }
       throw new Error(
         `vcc-plus: check request did not succeed (stopReason=${response?.stopReason ?? "unknown"}${detail})`,
       );
@@ -1168,7 +1281,20 @@ export async function onBeforeCompact(event: Any, ctx: Any, cfg: Config): Promis
       },
     };
   } catch (error) {
-    log("abort", { why: "check loop failed", error: String(error) });
+    const overflow = (error as Any)?.overflow as { tokens: number | null; limit: number | null } | undefined;
+    log("abort", { why: "check loop failed", error: String(error), overflow: overflow ?? undefined });
+    if (overflow && cfg.onContextOverflow !== "fail") {
+      // Unblock the session: the context is over the provider's window, so no
+      // prefix could be reused anyway and the summary is the only way out.
+      const fallback = draftFallback(
+        ctx,
+        log,
+        "overflow_fallback",
+        "the check request cannot fit the provider's context window; compacting with the mechanical draft (unchecked)",
+        prep,
+      );
+      if (fallback) return fallback;
+    }
     return fail(cfg, ctx, log, reason, String(error), prep);
   } finally {
     phase = null;
@@ -1180,19 +1306,32 @@ export async function onBeforeCompact(event: Any, ctx: Any, cfg: Config): Promis
  * fallbackToNative is explicitly enabled: undefined would let pi run its own
  * (prefix-breaking) summarization instead.
  */
+/**
+ * Compact with the finalized mechanical draft, without a model check. Visible
+ * by construction: a log line plus a warning in the UI. Used by the explicit
+ * `onFailure: "draft"` policy and when the check request cannot fit the
+ * provider's context window (where refusing to compact would leave a session
+ * that can no longer run at all). Returns null when there is no draft yet.
+ */
+export function draftFallback(ctx: Any, log: Logger, after: string, message: string, prep?: Any): Any | null {
+  if (!phase?.draft) return null;
+  log(after, { message });
+  if (ctx?.hasUI) ctx.ui.notify(`vcc-plus: ${message}`, "warning");
+  const finalized = finalizeSummary(phase.draft);
+  log("finalize", { ...finalized.report, after });
+  return {
+    compaction: {
+      summary: finalized.text,
+      firstKeptEntryId: prep?.firstKeptEntryId,
+      tokensBefore: prep?.tokensBefore,
+    },
+  };
+}
+
 function fail(cfg: Config, ctx: Any, log: Logger, reason: string, message: string, prep?: Any): Any {
-  if (cfg.onFailure === "draft" && phase?.draft) {
-    log("fallback_draft", { message });
-    if (ctx?.hasUI) ctx.ui.notify(`vcc-plus: using the unchecked draft (${message})`, "warning");
-    const finalized = finalizeSummary(phase.draft);
-    log("finalize", { ...finalized.report, after: "fallback_draft" });
-    return {
-      compaction: {
-        summary: finalized.text,
-        firstKeptEntryId: prep?.firstKeptEntryId,
-        tokensBefore: prep?.tokensBefore,
-      },
-    };
+  if (cfg.onFailure === "draft") {
+    const fallback = draftFallback(ctx, log, "fallback_draft", `using the unchecked draft (${message})`, prep);
+    if (fallback) return fallback;
   }
   if (cfg.fallbackToNative) {
     log("fallback_native", { message });
@@ -1249,6 +1388,9 @@ export const __internals = {
   rebuildSnapshotFromSession,
   setToolProvider,
   keptTurnStats,
+  parseOverflowError,
+  trimCheckMessages,
+  draftFallback,
   snapshotContinuationAssistant,
   _testSetPhase: (p: Phase | null) => {
     phase = p;
