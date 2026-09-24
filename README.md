@@ -65,13 +65,22 @@ git commit -m "bump pi-vcc"
 
 - **messages**：`context` 事件在每次 provider 请求前触发，快照保存的是模型实际看到的 agent 格式消息
   （`images.blockImages` 开启时做与 pi `convertToLlmWithBlockImages` 相同的替换）；
+- **上一轮回复**：检查请求在尾部指令之前再拼一条 assistant 消息（快照之后会话里新增的最后一条回复）。
+  服务端刚刚生成过这条回复，KV 里就有——拼上它，检查请求才是上一次请求的**严格延续**（与正常轮次
+  之间的关系完全一致），服务端才肯按前缀命中。没有它，token 流在快照结尾处就与 slot 里存的序列分叉；
 - **tools**：只从 `before_provider_request` 的 payload 取（上一次请求自己的 wire tools，含顺序）；
   检查请求经自定义 fetch 发出，出站 body 的 `tools` 被替换为这份**原始 wire tools**——构造性字节一致
   （pi-ai 自己的重建永远不上 wire）；
+- **请求级参数**：自定义 fetch 同时把上一次请求的请求级参数（`chat_template_kwargs`、`max_tokens`、
+  `store`、采样参数……）写回出站 body。两个原因：① `chat_template_kwargs` 参与**服务端模板渲染**，
+  `enable_thinking` 一变（agent 轮次为 true、`complete()` 检查请求默认 false），渲染出的 token 序列就不同，
+  前缀再字节相同也命不中；② 部分服务端（实测 FastLLM）把 `max_tokens` 也算进前缀缓存键。
+  `model` / `messages` / `tools` 由扩展自己掌控，永不被覆盖；
 - **字节级复核**：第 1 轮把出站 body 与上一次真实请求的 wire body 做前缀比较（system / tools / messages），
   结果写 `checkPrefix` 日志（`identical` + `firstDivergence`），完整 body 写 `.pi/prefix-sentinel/check-request.json`。
   基线要求新鲜（`ts ≥ 快照时刻`），旧进程/其它会话的残留不会误报；
 - **框架层断言**：`round.cacheRead ≈ 前缀长度`（`prefixSuspect` 必须为 false）——同一不变量的第二道防线。
+  注意命中按**块**对齐（vLLM 16 token / FastLLM 2048 token），不足一块的尾部本来就要 prefill；
 
 ### 失败处理
 

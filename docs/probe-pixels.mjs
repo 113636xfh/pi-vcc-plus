@@ -72,15 +72,27 @@ function expect(name, x, y, hex, label, opts = {}) {
 
 // Text-ink probe: near the first glyph of a centered line there must be a
 // clearly dark pixel (text) — a missing glyph leaves only the fill color.
+// CJK glyphs have side bearings, so scan a few offsets inside the first glyph
+// cell instead of one fixed point; a missing glyph still yields zero ink.
 function ink(name, text, cx, baseline, size, bold = false) {
 	const w = measure(text, size, bold);
-	const x = Math.round(cx - w / 2 + Math.max(2, size * 0.15));
+	const base = cx - w / 2;
 	const y = Math.round(baseline - size * 0.35);
-	const px = rawPixels(name, x, y, 2);
-	const dark = px.filter((p) => 765 - (p[0] + p[1] + p[2]) > 150).length;
-	const ok = dark >= Math.max(2, Math.round(px.length * 0.12));
+	const offsets = [Math.max(2, size * 0.15), Math.max(3, size * 0.4), Math.max(4, size * 0.65)];
+	let best = 0;
+	let where = 0;
+	for (const off of offsets) {
+		const x = Math.round(base + off);
+		const px = rawPixels(name, x, y, 2);
+		const dark = px.filter((p) => 765 - (p[0] + p[1] + p[2]) > 150).length;
+		if (dark > best) {
+			best = dark;
+			where = x;
+		}
+	}
+	const ok = best >= 2;
 	if (!ok) failed = true;
-	console.log(`${ok ? "ok  " : "FAIL"} ink "${text.slice(0, 24)}" @(${x},${y}) dark ${dark}/${px.length}`);
+	console.log(`${ok ? "ok  " : "FAIL"} ink "${text.slice(0, 24)}" @(${where},${y}) dark ${best}/25`);
 }
 
 // Per-figure specs: shared geometry (zh/en), language-specific text for ink.
@@ -98,11 +110,16 @@ const FLOW_INK = (name, texts) => {
 };
 const REQUEST_INK = (name, texts) => {
 	ink(name, texts.title, 640, 52, 26, true);
-	ink(name, texts.gt, 470, 170, 20, true);
-	ink(name, texts.gs, 470, 198, 15);
-	ink(name, texts.ot, 1070, 170, 20, true);
-	ink(name, texts.os, 1070, 198, 15);
-	ink(name, texts.caption, 640, 300, 15);
+	ink(name, texts.sub, 640, 86, 15);
+	ink(name, texts.gt, 330, 176, 20, true);
+	ink(name, texts.gs, 330, 208, 15);
+	ink(name, texts.bt, 770, 176, 20, true);
+	ink(name, texts.bs, 770, 208, 15);
+	ink(name, texts.ot, 1080, 176, 20, true);
+	ink(name, texts.os, 1080, 208, 15);
+	ink(name, texts.c1, 640, 300, 15);
+	ink(name, texts.c2, 640, 328, 15);
+	ink(name, texts.c3, 640, 356, 15);
 };
 const FAIL_INK = (name, texts) => {
 	ink(name, texts.title, 640, 52, 26, true);
@@ -138,19 +155,29 @@ const SPECS = {
 		}),
 	},
 	"02-request": {
-		fills: [[470, 184, "#eefaf3"], [1070, 184, "#fdeacc"], [20, 20, "#ffffff"]],
+		fills: [[330, 190, "#eefaf3"], [770, 190, "#eef3fb"], [1080, 190, "#fdeacc"], [20, 20, "#ffffff"]],
 		ink: () => REQUEST_INK("02-request", {
-			title: "检查请求的构成", gt: "前缀（逐字节复用）", gs: "system + tools + messages（取自上一次真实请求）",
+			title: "检查请求的构成",
+			sub: "只有橙色段是新内容：绿色与蓝色段服务端已经算过，KV 缓存直接复用",
+			gt: "前缀（逐字节复用）", gs: "system + tools + messages（上一次真实请求的原文）",
+			bt: "上一轮回复", bs: "服务端已生成并缓存",
 			ot: "尾部指令", os: "草稿 + 预算 + 补丁规则",
-			caption: "前缀与上一次请求相同 → KV 缓存直接命中，只 prefill 新增尾部",
+			c1: "三段拼起来与上一次请求严格连续 → 服务端按前缀命中，不再全量 prefill",
+			c2: "请求级参数（chat_template_kwargs / max_tokens）也沿用上一次请求：它们决定模板渲染与缓存键",
+			c3: "命中按块对齐（vLLM 16 token / FastLLM 2048 token），不足一块的尾部照常 prefill",
 		}),
 	},
 	"02-request-en": {
-		fills: [[470, 184, "#eefaf3"], [1070, 184, "#fdeacc"], [20, 20, "#ffffff"]],
+		fills: [[330, 190, "#eefaf3"], [770, 190, "#eef3fb"], [1080, 190, "#fdeacc"], [20, 20, "#ffffff"]],
 		ink: () => REQUEST_INK("02-request-en", {
-			title: "What the check request looks like", gt: "reused prefix", gs: "system + tools + messages (last real request)",
+			title: "What the check request looks like",
+			sub: "only the orange segment is new: the server already computed the green and blue parts",
+			gt: "reused prefix", gs: "system + tools + messages (verbatim)",
+			bt: "the last reply", bs: "already in the server KV",
 			ot: "tail instruction", os: "draft + budget + patch rules",
-			caption: "the prefix matches the previous request, so the KV cache is reused and only the new tail is prefilled",
+			c1: "the three segments are a strict continuation of the last request, so the server reuses its KV",
+			c2: "request-level parameters (chat_template_kwargs / max_tokens) come from that request too: they drive template rendering and the cache key",
+			c3: "reuse is block-aligned (vLLM 16 tok / FastLLM 2048 tok); the tail remainder is prefilled as usual",
 		}),
 	},
 	"03-failclosed": {

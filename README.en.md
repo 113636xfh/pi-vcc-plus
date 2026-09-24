@@ -90,11 +90,28 @@ happens on the `session_before_compact` event — after receiving the
   snapshot stores the agent-format messages the model actually saw (with the
   same substitution as pi's `convertToLlmWithBlockImages` when
   `images.blockImages` is enabled);
+- **the last reply**: before the tail instruction the check request appends
+  one more assistant message — the last reply the session gained after the
+  snapshot. The server generated that reply moments ago and still holds its
+  KV, so appending it makes the check request a **strict continuation** of
+  the last request (exactly the relationship normal turns have with each
+  other) and the server agrees to reuse the prefix. Without it the token
+  stream diverges from the sequence stored in the slot right at the snapshot
+  boundary;
 - **tools**: taken only from the `before_provider_request` payload (the last
   request's own wire tools, including order); the check request goes out
   through a custom fetch, and the outgoing body's `tools` are replaced with
   this **original wire tools** — structurally byte-identical (pi-ai's own
   reconstruction never reaches the wire);
+- **request-level parameters**: the same custom fetch writes the last
+  request's request-level parameters back onto the outgoing body
+  (`chat_template_kwargs`, `max_tokens`, `store`, sampling, ...). Two reasons:
+  (1) `chat_template_kwargs` feeds **server-side template rendering** — flip
+  `enable_thinking` (true on agent turns, false by default on the
+  `complete()` check call) and the rendered token sequence changes, so a
+  byte-identical message prefix still misses; (2) some servers (measured:
+  FastLLM) also key the prefix cache on `max_tokens`. `model` / `messages` /
+  `tools` are owned by the extension and never overwritten;
 - **Byte-level re-verification**: on round 1 the outgoing body is
   prefix-compared against the last real request's wire body (system / tools /
   messages); the result goes to the `checkPrefix` log (`identical` +
@@ -104,7 +121,8 @@ happens on the `session_before_compact` event — after receiving the
   cannot cause false alarms;
 - **Framework-level assertion**: `round.cacheRead ≈ prefix length`
   (`prefixSuspect` must be false) — a second line of defense on the same
-  invariant.
+  invariant. Note the hit is **block-aligned** (vLLM 16 tokens / FastLLM 2048
+  tokens); the remainder below one block is prefilled anyway.
 
 ### Failure handling
 

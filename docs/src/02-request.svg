@@ -1,19 +1,26 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 360" font-family="'Noto Sans CJK SC','Noto Sans',sans-serif">
-  <rect x="0" y="0" width="1280" height="360" fill="#ffffff"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 400" font-family="'Noto Sans CJK SC','Noto Sans',sans-serif">
+  <rect x="0" y="0" width="1280" height="400" fill="#ffffff"/>
 
   <text x="640" y="52" font-size="26" font-weight="bold" fill="#1a202c" text-anchor="middle">检查请求的构成</text>
-  <text x="640" y="86" font-size="15" fill="#5a6a80" text-anchor="middle">唯一的增量是尾部指令，之前全部逐字节复用</text>
+  <text x="640" y="86" font-size="15" fill="#5a6a80" text-anchor="middle">只有橙色段是新内容：绿色与蓝色段服务端已经算过，KV 缓存直接复用</text>
 
-  <!-- segment 1: reused prefix (green, large) -->
-  <rect x="40" y="140" width="860" height="88" rx="10" fill="#eefaf3" stroke="#22a06b" stroke-width="2"/>
-  <text x="470" y="170" font-size="20" font-weight="bold" fill="#1e7a4c" text-anchor="middle">前缀（逐字节复用）</text>
-  <text x="470" y="198" font-size="15" fill="#5a6a80" text-anchor="middle">system + tools + messages（取自上一次真实请求）</text>
+  <!-- segment 1: reused prefix (green, the largest) -->
+  <rect x="40" y="140" width="580" height="100" rx="10" fill="#eefaf3" stroke="#22a06b" stroke-width="2"/>
+  <text x="330" y="176" font-size="20" font-weight="bold" fill="#1e7a4c" text-anchor="middle">前缀（逐字节复用）</text>
+  <text x="330" y="208" font-size="15" fill="#5a6a80" text-anchor="middle">system + tools + messages（上一次真实请求的原文）</text>
 
-  <!-- segment 2: tail instruction (orange, the only new part) -->
-  <rect x="900" y="140" width="340" height="88" rx="10" fill="#fdeacc" stroke="#e8850c" stroke-width="2"/>
-  <text x="1070" y="170" font-size="20" font-weight="bold" fill="#9a4d00" text-anchor="middle">尾部指令</text>
-  <text x="1070" y="198" font-size="15" fill="#5a6a80" text-anchor="middle">草稿 + 预算 + 补丁规则</text>
+  <!-- segment 2: the reply the server already generated -->
+  <rect x="640" y="140" width="260" height="100" rx="10" fill="#eef3fb" stroke="#3468b5" stroke-width="2"/>
+  <text x="770" y="176" font-size="20" font-weight="bold" fill="#24508f" text-anchor="middle">上一轮回复</text>
+  <text x="770" y="208" font-size="15" fill="#5a6a80" text-anchor="middle">服务端已生成并缓存</text>
 
-  <!-- caption: the consequence -->
-  <text x="640" y="300" font-size="15" fill="#5a6a80" text-anchor="middle">前缀与上一次请求相同 → KV 缓存直接命中，只 prefill 新增尾部</text>
+  <!-- segment 3: tail instruction (the only new part) -->
+  <rect x="920" y="140" width="320" height="100" rx="10" fill="#fdeacc" stroke="#e8850c" stroke-width="2"/>
+  <text x="1080" y="176" font-size="20" font-weight="bold" fill="#9a4d00" text-anchor="middle">尾部指令</text>
+  <text x="1080" y="208" font-size="15" fill="#5a6a80" text-anchor="middle">草稿 + 预算 + 补丁规则</text>
+
+  <!-- captions: the mechanics that make the reuse hold -->
+  <text x="640" y="300" font-size="15" fill="#5a6a80" text-anchor="middle">三段拼起来与上一次请求严格连续 → 服务端按前缀命中，不再全量 prefill</text>
+  <text x="640" y="328" font-size="15" fill="#5a6a80" text-anchor="middle">请求级参数（chat_template_kwargs / max_tokens）也沿用上一次请求：它们决定模板渲染与缓存键</text>
+  <text x="640" y="356" font-size="15" fill="#5a6a80" text-anchor="middle">命中按块对齐（vLLM 16 token / FastLLM 2048 token），不足一块的尾部照常 prefill</text>
 </svg>
