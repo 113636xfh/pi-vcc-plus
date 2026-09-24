@@ -23,3 +23,28 @@ VCC 侧用它的 `compileRanked`（生产预算）本地跑，原生侧直接用
 
 因此尾部指令明确列出五类"重点补什么"：约束与安全红线、决策及理由、精确环境信息、未完成项与下一步、实测结论与失败事实。
 （另有更早的一次实验记录了 pi 原生摘要调用 30+ 次 `cacheRead: 0`，以及 Codex / Claude Code 的对照，见会话记录。）
+
+## 前缀缓存的实测（"字节相同"为什么还不够）
+
+2026-09-23/24 在 e5 的生产服务上做的对照实验（`/v1/chat/completions`，同一段 ~2.9K token 的对话，
+依次改变一个变量，读响应里的 `usage.prompt_tokens_details.cached_tokens`）：
+
+| 变更 | FastLLM（`--prefix_cache true`） | 说明 |
+|---|---|---|
+| 只追加一条 user 消息（对照组） | cached=2048（= ⌊种子/2048⌋×2048） | 正常延续 → 命中，且命中按 2048 token 块对齐 |
+| `chat_template_kwargs.enable_thinking` true → false | cached=0 | 模板渲染出的 token 序列变了（同一段历史 2912 vs 2876 token） |
+| `max_tokens` 100 → 26214 | cached=0 | 该服务端把 `max_tokens` 也算进前缀缓存键 |
+| `store` false/不传 | 无差异 | 与缓存键无关 |
+
+生产会话里的同一现象（`scripts/log-rounds.mjs` 输出）：`checkPrefix identical=true` 但
+round 1 `cacheRead=0 / prefixSuspect=true`，随后 round 2 命中 219,136 —— 说明"同一轮里的延续"能命中，
+"跨到真实请求"不能。
+
+两条修复（`7c78e6a`）：
+
+1. 检查请求拼上上一次请求关尾的那条 assistant 回复（`snapshotContinuationAssistant`）；
+2. 自定义 fetch 把上一次请求的请求级参数（除 `model`/`messages`/`tools`）写回出站 body
+   （`wireParams`），使渲染与缓存键与上一次请求完全一致。
+
+块粒度是关键：vLLM 默认 16 token、FastLLM 2048 token，命中只会命中完整块，
+不足一块的尾部照常 prefill——所以 `cacheRead` 略小于前缀长度是正常状态，不该被误判成 miss。
