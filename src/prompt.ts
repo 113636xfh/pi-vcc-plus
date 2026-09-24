@@ -94,6 +94,8 @@ ${customInstructions ? `\n[User instructions for this summary] ${customInstructi
   resolves like the headers above ([Outstanding] counts as [Outstanding Context]) and a
   missing section is created. Add "replace":true to drop the section's current bullets
   first: that one call rewrites the section (typical: refresh [Session Goal] or [Results]).
+  Its receipt shows both sides: removed lines with the numbers they had, added lines with
+  the numbers they just got (so you can delete one of them later by that number).
 - In addition: any fact that only exists in the transcript and matters must be moved into a
   section with vcc_add, because the transcript is dropped at finalize.
 - Only vcc_delete / vcc_add / vcc_draft / vcc_done may be called; any other tool (including

@@ -132,6 +132,21 @@ describe("vcc_add (applyAdd)", () => {
     expect(result.added).toBe(1);
   });
 
+  test("the receipt shows the appended lines with their new numbers", () => {
+    const result = add("Results", ["- 92/92 tests", "- cacheRead=0"]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const added = result.receipt.split("\n").filter((line) => line.startsWith("  + "));
+    expect(added.length).toBe(2);
+    // "  +   9 | - 92/92 tests" — the number must match the new draft
+    const newLines = result.text.split("\n");
+    for (const entry of added) {
+      const match = /^\s*\+\s*(\d+)\s*\|\s*(.*)$/.exec(entry);
+      expect(match).not.toBeNull();
+      expect(newLines[Number(match![1]) - 1]).toBe(match![2]);
+    }
+  });
+
   test("resolves aliases to their canonical section", () => {
     const result = add("Outstanding Context", ["- moved"]);
     expect(result.ok).toBe(true);
@@ -157,6 +172,9 @@ describe("vcc_add (applyAdd)", () => {
     expect(result.text).toContain("[Session Goal]\n- 消除压缩期间的双重 prefill\n\n[Files And Changes]");
     expect(result.text).not.toContain("Discuss why MTP");
     expect(result.receipt).toContain("+1 -2");
+    // both sides are listed, numbered: removed by their old number, added by their new one
+    expect(result.receipt).toMatch(/\n\s*−\s*2 \| - Discuss why MTP is slow on e5/);
+    expect(result.receipt).toMatch(/\n\s*\+\s*2 \| - 消除压缩期间的双重 prefill/);
   });
 
   test("replace:true on a missing section just creates it", () => {

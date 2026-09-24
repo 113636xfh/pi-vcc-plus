@@ -135,7 +135,7 @@ function finish(args: {
 }): Applied | Rejected {
   const { lines, deletions, insertions, grouped, capTokens, charsPerToken } = args;
   const out: string[] = [];
-  const emit = (anchor: number) => {
+  const emit = (anchor: number): void => {
     const list = insertions.get(anchor);
     if (list) out.push(...list);
   };
@@ -254,20 +254,29 @@ export function applyAdd(args: {
     for (let i = span.header + 1; i < span.next; i++) {
       if (!draftLines[i].trim()) continue;
       deletions.set(i, draftLines[i]);
-      bucket.removed.push(draftLines[i]);
+      // removed lines keep the numbers they had in the incoming draft
+      bucket.removed.push(`${String(i + 1).padStart(String(draftLines.length).length)} | ${draftLines[i]}`);
     }
   }
 
   const body = lines.filter((line, i) => line.trim() || (i > 0 && i < lines.length - 1));
   const anchor = span ? span.last : lastContentLine(draftLines, end);
   const insert: string[] = [];
+  const structural = !span ? (anchor >= 0 && draftLines[anchor].trim() ? 2 : 1) : 0;
   if (!span) {
     if (anchor >= 0 && draftLines[anchor].trim()) insert.push("");
     insert.push(`[${canonical}]`);
   }
   insert.push(...body);
   const insertions = new Map<number, string[]>([[anchor, insert]]);
-  bucket.added.push(...body);
+  // The appended lines are numbered in the NEW draft: every surviving line up to
+  // and including the anchor, then the structural lines, then the body.
+  const deletedUpTo = [...deletions.keys()].filter((i) => i <= anchor).length;
+  const emittedBefore = anchor >= 0 ? anchor + 1 - deletedUpTo : 0;
+  const width = String(draftLines.length).length;
+  body.forEach((line, i) =>
+    bucket.added.push(`${String(emittedBefore + structural + 1 + i).padStart(width)} | ${line}`),
+  );
 
   return finish({ lines: draftLines, deletions, insertions, grouped, capTokens, charsPerToken });
 }

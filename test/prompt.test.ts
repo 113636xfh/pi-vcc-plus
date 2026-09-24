@@ -93,6 +93,8 @@ describe("buildTailInstruction", () => {
     expect(text).toContain("The receipt lists the\n  removed lines with their numbers");
     expect(text).toContain('vcc_add: {"section":"Results","lines":["- round 1 cacheRead=37632 (hit)"]} appends');
     expect(text).toContain("no locating text, no anchor line to repeat");
+    expect(text).toContain("Its receipt shows both sides: removed lines with the numbers they had, added lines with");
+    expect(text).toContain("the numbers they just got");
     expect(text).toContain("Add \"replace\":true to drop the section's current bullets");
     // the draft the model sees is numbered, and the transcript marker separates the regions
     expect(text).toContain("1 | [Session Goal]");
