@@ -2,8 +2,10 @@
 
 ## 三条不变量
 
-1. **前文不改**：检查请求 = 上一次真实请求的快照（system + tools + messages 原文）+ 尾部追加，
-   因此前缀逐字节相同，KV 前缀必然复用；`round.prefixSuspect` 是对这条不变量的运行时断言。
+1. **前文不改**：检查请求 = 上一次真实请求的快照（system + tools + messages 原文）+ 上一次请求关尾的那条 assistant 回复 + 尾部追加，
+   且请求级参数（`chat_template_kwargs`、`max_tokens`、`store`、采样参数……）沿用上一次请求的值；
+   合起来才是“与上一次请求严格连续”的请求体，服务端才肯按前缀命中。
+   `round.prefixSuspect` 是对这条不变量的运行时断言（前缀逐字节相同但参数/渲染不同 → 仍然 miss）。
 2. **草稿由算法产出，模型只做增删改**：结构、文件清单、长度由 VCC 保证；模型通过 `vcc_patch` 修正。
 3. **不新增并发**：不起后台 worker、不发独立摘要请求；所有模型调用都在当前会话内顺序发生。
 
@@ -14,6 +16,8 @@
 | 用 `session_before_compact` 接管，而不是新造触发 | pi 的触发点天然位于"工具批次结束 / 下一次 assistant 请求之前"，正是安全截断点；手动 `/compact` 沿用 pi 自己的 abort |
 | 指令只加在**尾部**，system/tools 不动 | 原生的摘要请求换 system prompt + 重排正文 + 去掉 tools，token 0 就变了 → 必然 miss |
 | tools 只从 `before_provider_request` 的 payload 取 | 事件 ctx 不暴露 `getAllTools` / `getSystemPromptOptions`，registry 顺序 ≠ 线上顺序；payload 是上一次请求自己的 wire tools，唯一逐字节等价来源。校验请求经**自定义 fetch** 发出：出站 body 的 `tools` 被替换为捕获到的**原始 wire tools**（构造性字节一致，pi-ai 的重建永远不上 wire）。`toolsRoundTripStatus` 保留为三保险：wire tools 含 grammar/custom、`strict: true`、`defer_loading` 或未知形状时检查 fail-closed |
+| 拼上“上一次请求关尾的那条 assistant 回复”（`snapshotContinuationAssistant`） | 服务端 slot 里存的是“上一次请求的 prompt + 它生成的回复”。检查请求缺了这条回复，token 流就在快照结尾处与 slot 序列分叉——实测 FastLLM prefix cache 直接给 0 命中、全量重 prefill（~204K token / 10 分钟）。补上它，两者关系与正常轮次之间完全一致（会话里已有该条目，序列化走同一条 pi-ai 通路）；若快照里已有同内容 assistant（生成被中断等），不重复拼 |
+| 请求级参数也沿用上一次请求 | `chat_template_kwargs` 参与**服务端 chat 模板渲染**：agent 轮次 `enable_thinking: true`，`complete()` 发出的检查请求默认 `false`，同一段历史渲染出的 token 就不同（实测 2.9K 的 prompt 差 36 token）→ 前缀再逐字节相同也命不中；另外部分服务端（实测 FastLLM）把 `max_tokens` 也算进缓存键。自定义 fetch 在替换 tools 之外，把捕获到的请求级参数（除 `model`/`messages`/`tools`）写回出站 body |
 | 检查用"打补丁"而不是"重写摘要" | 模型无法破坏 VCC 的结构；失败可定位到行；`oldText` 唯一匹配的语义与原生 edit 一致，模型最熟练 |
 | 只用 `vcc_patch` / `vcc_draft` / `vcc_done` | 校验阶段给模型一个封闭的动作空间；`vcc_draft` 仅在 diff 不足以判断时使用 |
 | 上限用 `min(0.8 × reserveTokens, model.maxTokens)` | 与 pi 原生摘要完全相同的预算公式；写进提示词，并由 P4 校验（同一个取值来源） |

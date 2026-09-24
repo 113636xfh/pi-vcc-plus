@@ -153,6 +153,7 @@ bun test test/                              # P1–P4 单测 + 校验循环回�
 bun run test/draft-smoke.ts <session.jsonl>  # 用真实会话离线生成草稿（不调模型）
 node scripts/e2e-rpc-compact-test.mjs        # RPC E2E：种子短会话 → 三轮 → /compact
 node scripts/e2e-rpc-compact-resume.mjs      # 恢复压缩后的会话 → 提问 → 第二次 /compact
+node scripts/log-rounds.mjs [sessionId]      # 读会话日志，打出每轮 cacheRead / prefixSuspect 验收表
 ```
 
 > `bun run typecheck` 需要 devDependencies（`typescript`、`@earendil-works/pi-coding-agent@0.85.1` 等）：

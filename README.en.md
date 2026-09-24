@@ -210,6 +210,7 @@ bun test test/                              # P1–P4 unit tests + check-loop re
 bun run test/draft-smoke.ts <session.jsonl>  # offline draft from a real session (no model calls)
 node scripts/e2e-rpc-compact-test.mjs        # RPC E2E: seed a short session -> three turns -> /compact
 node scripts/e2e-rpc-compact-resume.mjs      # resume the compacted session -> ask -> second /compact
+node scripts/log-rounds.mjs [sessionId]      # read a session log: per-round cacheRead / prefixSuspect table
 ```
 
 > `bun run typecheck` needs devDependencies (`typescript`,
