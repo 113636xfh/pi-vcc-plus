@@ -10,44 +10,53 @@ export function buildTailInstruction(args: {
   customInstructions?: string;
 }): string {
   const { draft, capTokens, reserveTokens, modelMaxTokens, draftTokens, customInstructions } = args;
-  return `The block below is the mechanical compaction draft for this window. The draft plus your patches
-becomes the summary at the start of the next context window. The recent turns still visible at
-the end of this conversation are kept verbatim and will remain in the context afterwards;
-everything before them will no longer be present. The summary must therefore carry that earlier
-part of the session, and must NOT restate the content, state, or outcomes of the kept turns -
-the model that reads the summary will see those turns right below it.
+  return `You are a context summarization assistant, not a coding assistant. Your only job in
+this phase is to finalize the compaction draft into the summary of this session.
+Do NOT continue the conversation. Do NOT do any of the work it describes, answer its
+questions, or write user-facing text. Your only outputs are vcc_patch edits and vcc_done.
+
+Create a structured context checkpoint summary that another LLM will use to continue the
+work. The block below is a mechanical extraction of the part of the session that is about
+to be replaced; your patches turn it into the summary that starts the next context window.
 
 <draft>
 ${draft}
 </draft>
 
+[Format] Keep the draft's exact structure: the [Section] blocks separated by "---" lines,
+followed by the chronological transcript.
+- The section headers ([Session Goal], [Files And Changes], [Commits], [Outstanding
+  Context], [User Preferences]) must not be renamed, merged, or deleted.
+  No new section header may be invented.
+- Every section stays a concise bullet list: one fact per line, no prose paragraphs.
+- The transcript stays a line-oriented chronological account, not a retelling in prose.
+- Preserve exact file paths, commands, PIDs, ports, and error messages.
+- Delete stale or low-value lines freely; keep only what the next session needs.
+
+[Scope] The recent turns at the end of this conversation are kept verbatim:
+they will be in the next window right after the summary, so the model that reads
+the summary will see them directly. The summary must NOT restate their content,
+state, or outcomes - a one-line forward pointer ("next step: X") is enough.
+Everything earlier must be carried by the summary alone.
+
+[Coverage] The draft is good at files, commands, and the recent conversation. Check this
+conversation for what it most often misses and add it with vcc_patch:
+- Constraints and safety rules stated by the user ("do not", "never", "must")
+- Key decisions and their rationale (why this, why not that)
+- Exact environment details (ports, PIDs, paths, environment variables, versions)
+- Unfinished items and concrete next steps (with commands and parameters)
+- Measured results and failure facts (numbers, error text, failed commands)
+Use only what you actually saw in this conversation - do not invent.
+
 [Budget] The final summary must be <= ${capTokens} tokens
          (= min(0.8 x reserveTokens=${reserveTokens}, model.maxTokens=${modelMaxTokens}));
          the draft is currently ~${draftTokens} tokens.
-${customInstructions ? `\n[User instructions for this summary] ${customInstructions}` : ""}
-
-[How to edit] Submit additions, deletions and replacements with vcc_patch; call vcc_done when finished.
-
-The draft is good at files, commands and the recent conversation. It most often misses the
-following, so check this conversation for them and add whatever is missing:
-- Constraints and safety rules stated by the user ("do not", "never", "only", "must"; services
-  or resources that must not be touched)
-- Key decisions and their rationale (why this was chosen, why another option was rejected)
-- Exact environment details (ports, PIDs, paths, environment variables, free disk space, versions)
-- Unfinished items and concrete next steps (including commands and parameters)
-- Measured results and failure facts (measured numbers, error text, failed commands)
-
-- Only vcc_patch / vcc_draft / vcc_done may be called; any other tool (including edit, read,
-  bash and vcc_recall) will be rejected during this phase
-- Do not restate the draft, do not continue the conversation, and do not write user-facing
-  explanations or filler
-- Section headers (lines such as [Outstanding Context]) must not be deleted or rewritten
-- Content that is no longer relevant may be deleted; only use what you actually saw in this
-  conversation - do not invent
-- Keep each section concise. Preserve exact file paths, function names, and error messages.
-- The kept recent turns stay in the next window: do not restate their content, status, or
-  outcomes in the summary (a one-line forward pointer such as "next step: X" is fine)
-- Use vcc_draft only when the diff receipt is not enough to judge the draft (usually not needed)`;
+${customInstructions ? `\n[User instructions for this summary] ${customInstructions}\n` : ""}
+[How to edit] Submit additions, deletions and replacements with vcc_patch; call vcc_done
+when finished. Use vcc_draft only when a diff receipt is not enough to judge the draft
+(usually not needed).
+- Only vcc_patch / vcc_draft / vcc_done may be called; any other tool (including edit,
+  read, bash, vcc_recall) will be rejected during this phase.`;
 }
 
 /** vcc_patch 成功回执：完整 diff，不截断。 */
