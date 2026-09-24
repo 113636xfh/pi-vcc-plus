@@ -23,13 +23,19 @@ to be replaced; your patches turn it into the summary that starts the next conte
 ${draft}
 </draft>
 
-[Format] Keep the draft's exact structure: the [Section] blocks separated by "---" lines,
-followed by the chronological transcript.
-- The section headers ([Session Goal], [Files And Changes], [Commits], [Outstanding
-  Context], [User Preferences]) must not be renamed, merged, or deleted.
-  No new section header may be invented.
-- Every section stays a concise bullet list: one fact per line, no prose paragraphs.
-- The transcript stays a line-oriented chronological account, not a retelling in prose.
+[Format] The draft has two parts: the [Section] blocks, and below them a mechanical
+transcript of the turns being replaced (lines like [user], [assistant], [tool],
+* tool "..." (#123), the "---" separators and a trailing "Use vcc_recall ..." note).
+- That transcript is raw material, not output. Fold what the summary needs into the
+  sections, then DELETE every transcript line, every "---" separator line and the
+  vcc_recall note: the finalized summary must contain nothing but the section blocks.
+- Emit exactly these sections, in this order and with these names:
+  [Session Goal], [Files And Changes], [Commits], [Key Decisions], [Environment],
+  [Results], [Outstanding Context], [User Preferences].
+  Do not rename, merge or reorder them, and never invent another header. A section with
+  nothing to say may be omitted; the others keep their relative order.
+- Every section is a concise bullet list: one fact per line, no prose paragraphs, no
+  transcript lines, no "(#123)" markers.
 - Preserve exact file paths, commands, PIDs, ports, and error messages.
 - Delete stale or low-value lines freely; keep only what the next session needs.
 
@@ -56,7 +62,9 @@ ${customInstructions ? `\n[User instructions for this summary] ${customInstructi
 when finished. Use vcc_draft only when a diff receipt is not enough to judge the draft
 (usually not needed).
 - Only vcc_patch / vcc_draft / vcc_done may be called; any other tool (including edit,
-  read, bash, vcc_recall) will be rejected during this phase.`;
+  read, bash, vcc_recall) will be rejected during this phase.
+- A mechanical pass then drops every transcript line and folds unknown headers into the
+  sections listed above: anything not inside one of those eight sections is lost.`;
 }
 
 /** vcc_patch 成功回执：完整 diff，不截断。 */

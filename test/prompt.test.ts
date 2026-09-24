@@ -27,11 +27,15 @@ describe("buildTailInstruction", () => {
   test("pins the format structure: fixed section headers, bullets, no invented sections", () => {
     const text = buildTailInstruction({ ...base });
     expect(text).toContain("[Format]");
-    expect(text).toContain("[Session Goal], [Files And Changes], [Commits], [Outstanding");
-    expect(text).toContain("must not be renamed, merged, or deleted");
-    expect(text).toContain("No new section header may be invented");
+    expect(text).toContain(
+      "[Session Goal], [Files And Changes], [Commits], [Key Decisions], [Environment],\n  [Results], [Outstanding Context], [User Preferences]",
+    );
+    expect(text).toContain("That transcript is raw material, not output");
+    expect(text).toContain("DELETE every transcript line");
+    expect(text).toContain("Do not rename, merge or reorder them, and never invent another header");
     expect(text).toContain("one fact per line, no prose paragraphs");
     expect(text).toContain("Preserve exact file paths, commands, PIDs, ports, and error messages");
+    expect(text).toContain("anything not inside one of those eight sections is lost");
   });
 
   test("keeps the coverage checklist for what the mechanical draft misses", () => {

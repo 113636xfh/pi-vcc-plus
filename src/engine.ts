@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { convertToLlm } from "@earendil-works/pi-coding-agent";
 import { type Config } from "./config";
 import { createLogger, type Logger } from "./log";
+import { finalizeSummary } from "./finalize";
 import { applyChanges, SECTION_RE, tokensOf, type Change } from "./patch";
 import {
   ERR_DRAFT_READ_CAP,
@@ -892,7 +893,15 @@ async function runCheckLoop(args: {
       throw new Error("vcc-plus: the model never called vcc_done (guards.requireDone)");
     }
   }
-  return { summary: phase!.draft, usage, rounds: phase!.guard.rounds };
+  // The draft is a reader's artifact (sections + a mechanical transcript of the
+  // replaced turns + upstream's recall note). The summary handed to pi must be
+  // the sections only: strip the rest mechanically so the next window does not
+  // open with a transcript that reads like the kept turns were duplicated.
+  const finalized = finalizeSummary(phase!.draft);
+  if (finalized.report.changed || finalized.report.passthrough) {
+    log("finalize", { ...finalized.report });
+  }
+  return { summary: finalized.text, usage, rounds: phase!.guard.rounds };
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -1046,9 +1055,11 @@ function fail(cfg: Config, ctx: Any, log: Logger, reason: string, message: strin
   if (cfg.onFailure === "draft" && phase?.draft) {
     log("fallback_draft", { message });
     if (ctx?.hasUI) ctx.ui.notify(`vcc-plus: using the unchecked draft (${message})`, "warning");
+    const finalized = finalizeSummary(phase.draft);
+    log("finalize", { ...finalized.report, after: "fallback_draft" });
     return {
       compaction: {
-        summary: phase.draft,
+        summary: finalized.text,
         firstKeptEntryId: prep?.firstKeptEntryId,
         tokensBefore: prep?.tokensBefore,
       },

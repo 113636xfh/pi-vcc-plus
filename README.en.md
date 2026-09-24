@@ -78,9 +78,10 @@ happens on the `session_before_compact` event — after receiving the
    budget, patch rules);
 3. **Model patch loop** — the model revises the draft in the "compaction
    check phase" using three closed tools, over as many rounds as needed;
-4. **Finalize and write the session** — the finalized summary is returned to
-   pi, which writes the `CompactionEntry`; the kept tail enters the next
-   window verbatim.
+4. **Finalize and write the session** — a mechanical pass first drops the
+   draft's trailing transcript, the `---` separators and the `vcc_recall` note
+   (see below); the finalized summary is then returned to pi, which writes the
+   `CompactionEntry`; the kept tail enters the next window verbatim.
 
 ### What the check request looks like
 
@@ -123,6 +124,41 @@ happens on the `session_before_compact` event — after receiving the
   (`prefixSuspect` must be false) — a second line of defense on the same
   invariant. Note the hit is **block-aligned** (vLLM 16 tokens / FastLLM 2048
   tokens); the remainder below one block is prefilled anyway.
+
+### The final summary's shape (mechanical strip)
+
+Upstream VCC's draft is written for a human reader: `[Section]` blocks +
+`---` + a **transcript of the replaced turns** (`[user]` / `[assistant]` /
+`* tool "..." (#123)`) + `---` + the `vcc_recall` note. Its `mergePrevious`
+(`preserveFreshBriefOnMerge`) also merges the previous draft's transcript into
+the new one, so the transcript accumulates across compactions. Left in place,
+every new window opens with "summary + what looks like the last turns appended",
+carrying `[user]`/`[assistant]` markers and `(#123)` indices — and pi's kept
+turns follow right after, so it reads as duplicated content.
+
+So the summary is finalized mechanically (`src/finalize.ts`, **no model
+cooperation required**):
+
+- drop every transcript block, `---` separator line, `vcc_recall` note and
+  `...(N earlier lines omitted)` marker;
+- normalize the sections to the fixed set of eight, in a fixed order:
+  `[Session Goal]`, `[Files And Changes]`, `[Commits]`, `[Key Decisions]`,
+  `[Environment]`, `[Results]`, `[Outstanding Context]`, `[User Preferences]`;
+  aliases (`[Outstanding]`) are renamed and invented headers
+  (`[Root Cause: ...]`) are folded into the best-matching section by keyword —
+  no content is dropped;
+- only transcript/separator/note lines are ever removed: **section bullets are
+  never dropped**; exact duplicate lines inside one section are deduped;
+- if nothing section-shaped survives, the text is returned **unchanged** rather
+  than as an empty summary;
+- every strip logs a `finalize` line: `strippedTranscriptLines` /
+  `strippedSeparators` / `strippedNotes` / `renamed` / `folded` /
+  `charsBefore`->`charsAfter`.
+
+Measured on this repo's session `01a0ca67`: 15798 -> 8670 chars, 97 transcript
+lines, 3 `---` lines, 2 notes and 1 omitted marker removed;
+`[Outstanding]` -> `[Outstanding Context]` and
+`[Root Cause: double prefill]` folded into `[Results]`.
 
 ### Failure handling
 

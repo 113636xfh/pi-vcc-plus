@@ -64,6 +64,25 @@ fail-closed 的边界（全部在 `src/engine.ts`）：
 
 手动 `/compact <instructions>` 的 `customInstructions` 会拼进尾部指令（只影响前缀之后的内容，不影响缓存）。
 
+## 定稿：机械剥离（`src/finalize.ts`）
+
+上游 VCC 的草稿为“人读”而建：`[章节]` 块 + `---` + **逐轮转录** + `---` + `RECALL_NOTE`，
+且 `mergePrevious({preserveFreshBriefOnMerge:true})` 会把上一份草稿的转录合并进新草稿（跨压缩累积）。
+这段转录如果原样进下一次窗口，就会与 pi 保留的尾部叠在一起，看起来像“后几轮消息被追加到摘要后面”，
+并带着 `[user]`/`[assistant]` 与 `(#123)` 噪声。
+
+所以定稿前做一次**确定性**剥离（不靠模型配合，模型只负责把转录里的内容折进章节）：
+
+| 步骤 | 规则 |
+|---|---|
+| 去噪 | 丢转录块（首行 `[user]`/`[assistant]`/`[tool]`，或过半行带 `(#N)`）、`---` 块、`RECALL_NOTE`（含被 wrap 后的多行形式）、`...(N earlier lines omitted)` |
+| 转录模式 | 一旦进入转录区，后续无标题块也归转录（转录取自 assistant 消息，里面会带 `## 标题` 与正文），直到再出现 `[章节]` 为止 |
+| 归一 | 固定 8 节与固定顺序：`[Session Goal]`/`[Files And Changes]`/`[Commits]`/`[Key Decisions]`/`[Environment]`/`[Results]`/`[Outstanding Context]`/`[User Preferences]`；别名改名，自造标题按关键词并入（内容不丢） |
+| 保底 | 只删转录/分隔/提示行；章节 bullet 永不删；同节完全重复行去重；无章节形状时原文返回（绝不返回空摘要） |
+
+`## 标题` 只在名字命中已知章节名（`Goal`、`Key Decisions`…）时算章节边界——否则它就是转录引用的
+assistant 正文。每次剥离写一行 `finalize` 日志（`stripped*` / `renamed` / `folded` / `charsBefore→charsAfter`）。
+
 ## 目录与职责
 
 - `index.ts`：注册系统块、三个工具、`context` / `before_provider_request` 快照钩子、压缩接管。

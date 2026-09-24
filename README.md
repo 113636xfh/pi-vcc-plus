@@ -57,7 +57,8 @@ git commit -m "bump pi-vcc"
 1. **VCC 机械草稿**：本地运行上游 pi-vcc 生成结构化草稿（零模型调用）；
 2. **组装检查请求**：上一次 provider 请求的快照（system + tools + messages 原文）+ 尾部指令（草稿、预算、补丁规则）；
 3. **模型打补丁循环**：模型在"压缩校验阶段"用三个封闭工具修正草稿，可多轮；
-4. **定稿写入会话**：定稿摘要返回给 pi，由 pi 写 `CompactionEntry`；保留的尾部原样进入下一个窗口。
+4. **定稿写入会话**：定稿前先过一道机械剥离（丢掉草稿末尾的逐轮转录、`---` 与 `vcc_recall` 提示，见下），
+   再把定稿摘要返回给 pi、由 pi 写 `CompactionEntry`；保留的尾部原样进入下一个窗口。
 
 ### 检查请求的构成
 
@@ -81,6 +82,28 @@ git commit -m "bump pi-vcc"
   基线要求新鲜（`ts ≥ 快照时刻`），旧进程/其它会话的残留不会误报；
 - **框架层断言**：`round.cacheRead ≈ 前缀长度`（`prefixSuspect` 必须为 false）——同一不变量的第二道防线。
   注意命中按**块**对齐（vLLM 16 token / FastLLM 2048 token），不足一块的尾部本来就要 prefill；
+
+### 定稿摘要的格式（机械剥离）
+
+上游 VCC 的草稿是给“人读”的产物：`[章节]` 块 + `---` + **逐轮转录**（`[user]` / `[assistant]` /
+`* tool "…" (#123)`）+ `---` + `vcc_recall` 提示；它的 `mergePrevious`
+（`preserveFreshBriefOnMerge`）还会把上一份草稿的转录合并进新草稿，于是转录跨压缩累积。
+原样留下的话，下一个窗口打开就是“摘要 + 一堆像被追加的后几轮消息”，带着 `[user]`/`[assistant]`
+标记与 `(#123)` 索引——而 pi 保留的尾部又紧跟在后面，看起来就是重复。
+
+所以定稿前做一次机械剥离（`src/finalize.ts`，**不依赖模型配合**）：
+
+- 丢掉所有转录块、`---` 分隔行、`vcc_recall` 提示与 `...(N earlier lines omitted)` 标记；
+- 章节名归一到固定 8 个并按固定顺序输出：`[Session Goal]`、`[Files And Changes]`、`[Commits]`、
+  `[Key Decisions]`、`[Environment]`、`[Results]`、`[Outstanding Context]`、`[User Preferences]`；
+  别名（`[Outstanding]`）改名，自造标题（`[Root Cause: …]`）按关键词并入最合适的章节（内容不丢）；
+- 只动转录/分隔/提示行，**章节 bullet 永不丢弃**；同一节里的完全重复行去重；
+- 若剥离后没有任何章节（草稿不是章节形状）则**不做剥离、原文返回**，绝不把摘要变成空串；
+- 每次剥离写一行 `finalize` 日志：`strippedTranscriptLines` / `strippedSeparators` / `strippedNotes` /
+  `renamed` / `folded` / `charsBefore`→`charsAfter`。
+
+实测（本仓库会话 `01a0ca67` 那份摘要）：15798 → 8670 字符，剥掉 97 行转录、3 行 `---`、2 处提示、
+1 处省略标记；`[Outstanding]`→`[Outstanding Context]`，`[Root Cause: 双重 prefill（本次核心）]`→并入 `[Results]`。
 
 ### 失败处理
 
