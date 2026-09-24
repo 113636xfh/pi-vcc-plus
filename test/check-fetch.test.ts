@@ -112,8 +112,8 @@ describe("buildCheckFetch", () => {
     const wireParams = {
       max_tokens: 32768,
       store: false,
-      stream: true,
-      stream_options: { include_usage: true },
+      stream: false,
+      stream_options: { include_usage: false },
       chat_template_kwargs: { enable_thinking: true, preserve_thinking: true },
     };
     const fetch = buildCheckFetch(WIRE_TOOLS, capture, wireParams);
@@ -121,6 +121,8 @@ describe("buildCheckFetch", () => {
       model: "m",
       max_tokens: 26214,
       store: false,
+      stream: true,
+      stream_options: { include_usage: true },
       messages: [{ role: "user", content: "x" }],
       tools: RECONSTRUCTED_TOOLS,
       chat_template_kwargs: { enable_thinking: false, preserve_thinking: true },
@@ -133,6 +135,10 @@ describe("buildCheckFetch", () => {
     expect(JSON.parse(JSON.stringify(got.tools))).toEqual(WIRE_TOOLS);
     expect(got.messages).toEqual(outgoing.messages); // engine-owned, untouched
     expect(got.model).toBe("m");
+    // transport flags stay pi-ai's: a captured stream:false must not turn the
+    // streaming check call into a non-streaming one
+    expect(got.stream).toBe(true);
+    expect(got.stream_options).toEqual({ include_usage: true });
   });
 
   test("wireParams never overwrite model/messages/tools", async () => {

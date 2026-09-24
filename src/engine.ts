@@ -380,6 +380,11 @@ export function readWireBaseline(
  */
 type FetchLike = (input: Any, init?: Any) => Promise<unknown>;
 
+/** Parameters owned by the engine — a captured value never overwrites them. */
+const ENGINE_OWNED_PARAMS = new Set(["model", "messages", "tools"]);
+/** Transport flags that belong to pi-ai's own response parsing. */
+const TRANSPORT_PARAMS = new Set(["stream", "stream_options"]);
+
 export function buildCheckFetch(
   wireTools: Any,
   capture: { url?: string; bodyText?: string },
@@ -401,10 +406,11 @@ export function buildCheckFetch(
       // match; some providers also key their prefix cache on them
       // (measured: FastLLM returns cached=0 when max_tokens differs even
       // with a byte-identical message prefix). model/messages/tools are
-      // owned by the engine and never overwritten here.
+      // owned by the engine, and the transport flags belong to pi-ai's
+      // response parsing — neither is overwritten here.
       if (parsed && wireParams && typeof wireParams === "object") {
         for (const [key, value] of Object.entries(wireParams)) {
-          if (key === "model" || key === "messages" || key === "tools") continue;
+          if (ENGINE_OWNED_PARAMS.has(key) || TRANSPORT_PARAMS.has(key)) continue;
           parsed[key] = value;
         }
       }
