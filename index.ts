@@ -104,8 +104,8 @@ export default async function piVccPlus(pi: ExtensionAPI): Promise<void> {
   // registry for that — the active tools in pi-ai's Tool shape.
   setToolProvider(() => {
     try {
-      const active = new Set<string>((pi as any).getActiveTools?.() ?? []);
-      const all: any[] = (pi as any).getAllTools?.() ?? [];
+      const active = new Set<string>(pi.getActiveTools?.() ?? []);
+      const all = pi.getAllTools?.() ?? [];
       return all
         .filter((tool) => tool?.name && (active.size === 0 || active.has(tool.name)))
         .map((tool) => ({
