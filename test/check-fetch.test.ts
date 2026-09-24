@@ -774,6 +774,53 @@ describe("runCheckLoop: check-request byte verification (integration)", () => {
     _testSetSnapshot(null);
   });
 
+  test("alignCheckParams decides whether the check body keeps its own parameters", async () => {
+    for (const align of [true, false]) {
+      const cwd = join(scratch, align ? "align-on" : "align-off");
+      mkdirSync(cwd, { recursive: true });
+      // a fresh sentinel baseline so the engine writes the captured check body
+      setup(cwd, [u1], RECONSTRUCTED_TOOLS);
+      _testSetPhase(freshPhase());
+      _testSetSnapshot(
+        snapWith({
+          wireParams: {
+            max_tokens: 32768,
+            chat_template_kwargs: { enable_thinking: true, preserve_thinking: true },
+          },
+        }),
+      );
+      const cfg = structuredClone(DEFAULTS);
+      cfg.alignCheckParams = align;
+      const { log } = captureLog();
+      await runCheckLoop({
+        ctx: ctxWithCwd(cwd, async (_context, options) => {
+          // what pi-ai's complete() would send on its own (no thinking, cap budget)
+          const body = JSON.stringify({
+            model: "m",
+            messages: [u1, { role: "user", content: "TAIL" }],
+            tools: RECONSTRUCTED_TOOLS,
+            max_tokens: 26214,
+            chat_template_kwargs: { enable_thinking: false, preserve_thinking: true },
+          });
+          await (options.fetch as typeof globalThis.fetch)("https://x.test/v1/chat/completions", { method: "POST", body });
+          return doneResponse();
+        }),
+        model: { maxTokens: 4096 },
+        cfg,
+        signal: undefined,
+        capTokens: 10_000,
+        charsPerToken: 4,
+        reserveTokens: 16384,
+        log,
+      });
+      const sent = JSON.parse(readFileSync(join(cwd, ".pi", "prefix-sentinel", "check-request.json"), "utf8"));
+      expect(sent.max_tokens).toBe(align ? 32768 : 26214);
+      expect(sent.chat_template_kwargs.enable_thinking).toBe(align);
+      _testSetPhase(null);
+      _testSetSnapshot(null);
+    }
+  });
+
   afterAll(() => {
     rmSync(scratch, { recursive: true, force: true });
   });

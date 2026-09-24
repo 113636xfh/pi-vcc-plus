@@ -48,3 +48,20 @@ round 1 `cacheRead=0 / prefixSuspect=true`，随后 round 2 命中 219,136 —�
 
 块粒度是关键：vLLM 默认 16 token、FastLLM 2048 token，命中只会命中完整块，
 不足一块的尾部照常 prefill——所以 `cacheRead` 略小于前缀长度是正常状态，不该被误判成 miss。
+
+## 两个后端的命中判据不同（2026-09-24，同端口先后部署）
+
+| 维度 | FastLLM（ftllm，`--prefix_cache true`，GGUF 自带模板 v22.5） | vLLM（+ LMCache `--chunk-size 1568`，AWQ 的 HF 模板） |
+|---|---|---|
+| 命中粒度 | 2048 token（所有命中 = ⌊种子/2048⌋×2048） | 1568 token（LMCache chunk；命中值精确等于 1568 的整数倍） |
+| 缓存键含请求参数 | **含**：token 完全相同、`max_tokens` 100→26214 → `cached=0` | **不含**：`max_tokens`、`store` 变化照样命中 |
+| `enable_thinking` 翻转 | prompt 2900→2876（−36）且 `cached=0` → 分叉落在前 2048 token 内 | prompt 2874→2876（+2）且 `cached=1568` → 分叉只在尾部 |
+| 对扩展的含义 | 检查请求必须与上一次请求**逐字段**一致 | 只要消息字节一致即可 |
+
+`cached_tokens` 字段两边口径一致（`prompt_tokens_details.cached_tokens`；DeepSeek 为
+`prompt_cache_hit_tokens`、Kimi 为顶层 `cached_tokens`），pi-ai 都解析为 `cacheRead`，因此
+`round.prefixSuspect` 与哨兵的 `cacheVerdict` 在两端都成立。
+
+代价对照（同一次 E2E，vLLM、26K 上下文）：对齐开启时检查轮继承了 `enable_thinking: true`，
+round 1 输出 4441 token / 2m05s；对齐关闭时检查轮不思考（FastLLM 时代实测 25–45s/轮）。
+所以 `alignCheckParams` 按后端取舍：模板/缓存键与参数相关的后端留 true，纯 token 键的后端可关。

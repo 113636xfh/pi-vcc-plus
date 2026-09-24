@@ -46,6 +46,28 @@ export interface Config {
   fallbackToNative: boolean;
   /** Register pi-vcc's own vcc_recall tool (read-only history search). */
   upstreamRecallTool: boolean;
+  /**
+   * true (default) = the check request re-sends the last real request's
+   * request-level parameters (chat_template_kwargs, max_tokens, ...) so the
+   * provider sees the same rendering and the same cache key.
+   *
+   * Required on providers that re-render the prefix when the template
+   * parameters change or that key the prefix cache on them (measured: FastLLM
+   * returned cached_tokens=0 for a byte-identical prefix under a different
+   * max_tokens, and its template re-rendered the conversation when
+   * enable_thinking flipped).
+   *
+   * Cost: the check request inherits the session's thinking setting, so the
+   * model thinks during every check round (measured: 4441 output tokens for
+   * one round instead of a few hundred).
+   *
+   * false = keep pi-ai's own parameters (no thinking, output cap = the
+   * summary budget). Safe on providers whose prefix cache is keyed on the
+   * prompt tokens alone (measured: vLLM + LMCache, where flipping
+   * enable_thinking only moves the tail). Verify with
+   * `round.prefixSuspect` / `scripts/log-rounds.mjs` after changing it.
+   */
+  alignCheckParams: boolean;
   debugLog: boolean;
   systemBlock: string;
 }
@@ -82,6 +104,7 @@ export const DEFAULTS: Config = {
   onFailure: "auto",
   fallbackToNative: false,
   upstreamRecallTool: true,
+  alignCheckParams: true,
   debugLog: true,
   systemBlock: SYSTEM_BLOCK,
 };

@@ -178,6 +178,7 @@ source**; we never modify it):
   "onFailure": "auto",
   "fallbackToNative": false,
   "upstreamRecallTool": true,
+  "alignCheckParams": true,
   "debugLog": true,
   "systemBlock": "<pi-vcc-plus>…</pi-vcc-plus>"
 }
@@ -194,6 +195,19 @@ source**; we never modify it):
   failure;
 - `upstreamRecallTool: true` = registers the read-only `vcc_recall` that ships
   with upstream pi-vcc (rejected during the check phase);
+- `alignCheckParams: true` = the check request re-sends the last real
+  request's request-level parameters (`chat_template_kwargs`, `max_tokens`, ...)
+  so both the rendering and the cache key match it. **Needed** where the
+  template re-renders the prefix when those parameters change (measured:
+  FastLLM's GGUF template — flipping `enable_thinking` changed the same
+  history by 36 tokens → `cached_tokens=0`) or where the provider keys its
+  cache on them (measured: FastLLM — identical tokens, different `max_tokens`
+  → `cached_tokens=0`). **Cost**: check rounds inherit the session's thinking
+  setting (measured: one round emitted 4441 output tokens in 2m05s). Turn it
+  off for providers whose cache key is the prompt tokens alone (measured:
+  vLLM + LMCache — flipping `enable_thinking` only moves the tail by 2 tokens
+  and the hit stayed); check rounds then skip thinking and run much faster.
+  Re-verify with `round.prefixSuspect` or `node scripts/log-rounds.mjs`;
 - the config is read once when the extension loads; change `config.json` with
   `/reload` (changing it mid-session would change the system block and break
   the prefix invariant);

@@ -130,6 +130,7 @@ pi install "<repo-dir>"
   "onFailure": "auto",
   "fallbackToNative": false,
   "upstreamRecallTool": true,
+  "alignCheckParams": true,
   "debugLog": true,
   "systemBlock": "<pi-vcc-plus>…</pi-vcc-plus>"
 }
@@ -141,6 +142,14 @@ pi install "<repo-dir>"
 - `onFailure`：`auto`（手动抛错 / 自动 cancel+通知）、`cancel`、`throw`、`draft`（显式回退未校验草稿）；
 - `fallbackToNative: false` = 失败时不静默退回 pi 原生摘要；
 - `upstreamRecallTool: true` = 注册上游 pi-vcc 自带的只读 `vcc_recall`（校验阶段内被拒绝）；
+- `alignCheckParams: true` = 检查请求沿用上一次真实请求的请求级参数（`chat_template_kwargs`、
+  `max_tokens`……），使渲染与缓存键与上一次一致。**需要它的后端**：模板会在参数变化时重渲前缀
+  （实测 FastLLM 的 GGUF 模板：`enable_thinking` 翻转 → 同一段历史差 36 token → `cached_tokens=0`），
+  或把参数算进缓存键（实测 FastLLM：token 完全相同、只改 `max_tokens` → `cached_tokens=0`）。
+  **代价**：检查轮继承会话的思考设置，每轮都会思考（实测单轮输出 4441 token、耗时 2m05s）。
+  仅用「缓存键只由 prompt token 决定」的后端（实测 vLLM + LMCache：翻转 `enable_thinking` 只改尾部
+  2 token，命中照旧）时可以关掉，检查轮不思考、快得多；改完用 `round.prefixSuspect`
+  或 `node scripts/log-rounds.mjs` 复核；
 - 配置只在扩展加载时读一次；改 `config.json` 需 `/reload`（中途改会改变系统块、破坏前缀不变量）；
 - 草稿的 chars/token 校准沿用上游 `before-compact.ts` 的锚（span 字符 + 上次摘要字符 ÷ `tokensBefore`）：
   这是上游算法的行为（对估算偏保守），我们刻意保持一致、不单方分叉。

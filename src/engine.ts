@@ -751,7 +751,14 @@ async function runCheckLoop(args: {
         {
           maxTokens: capTokens,
           signal: controller.signal,
-          fetch: buildCheckFetch(snapshot?.wireTools, checkCapture, snapshot?.wireParams),
+          // Only align the request-level parameters when configured to: they
+          // are required where the provider re-renders the prefix or keys its
+          // cache on them, and cost thinking time where they are not.
+          fetch: buildCheckFetch(
+            snapshot?.wireTools,
+            checkCapture,
+            cfg.alignCheckParams === false ? undefined : snapshot?.wireParams,
+          ),
         },
       );
     } finally {
