@@ -35,6 +35,12 @@ interface Snapshot {
   /** Raw wire tools from the last request's payload (byte-exact, used to
    * replace the check request's tools via the custom fetch). */
   wireTools?: Any[];
+  /** Request-level wire parameters from the last request's payload
+   * (chat_template_kwargs, max_tokens, ...). FastLLM's prefix-cache key
+   * includes these: a check request that differs on them gets zero cache
+   * reuse even with a byte-identical message prefix (measured on e5).
+   * The custom fetch restores the captured values on the outgoing body. */
+  wireParams?: Record<string, unknown>;
   /** "mismatch" = the wire tools contain shapes that cannot be reconstructed
    * byte-exactly (grammar/custom tools, strict: true, deferred loading, or an
    * unrecognized shape) — the check request must fail closed. */
@@ -106,6 +112,20 @@ export function recordPayload(payload: Any, ctx: Any): void {
   }
   snapshot.toolsRoundTrip = toolsRoundTripStatus(wireTools);
   if (Array.isArray(wireTools)) snapshot.wireTools = wireTools;
+  // Capture the request-level wire parameters that the server includes in
+  // its prefix-cache key (see wireParams). Messages/tools are handled
+  // separately; these are everything else the server saw on the last real
+  // request (chat_template_kwargs, max_tokens, sampling, ...).
+  try {
+    const params: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(payload ?? {})) {
+      if (key === "model" || key === "messages" || key === "tools") continue;
+      if (value !== undefined) params[key] = value;
+    }
+    snapshot.wireParams = params;
+  } catch {
+    /* optional */
+  }
   // Self wire-baseline for check-request verification (fallback when the
   // prefix-sentinel is not installed). Best-effort; never throws.
   try {
@@ -159,6 +179,7 @@ export function persistSnapshot(cwd: string | undefined, sessionId: string | und
         tools: s.tools,
         toolsSource: s.toolsSource,
         wireTools: s.wireTools,
+        wireParams: s.wireParams,
         toolsRoundTrip: s.toolsRoundTrip,
         prefixTokens: s.prefixTokens,
       }),
@@ -195,6 +216,8 @@ export function restoreSnapshot(ctx: Any): boolean {
       tools: parsed.tools,
       toolsSource: "persisted (restored after reload)",
       wireTools: Array.isArray(parsed.wireTools) ? parsed.wireTools : undefined,
+      wireParams:
+        parsed.wireParams && typeof parsed.wireParams === "object" ? parsed.wireParams : undefined,
       toolsRoundTrip: parsed.toolsRoundTrip,
       prefixTokens: typeof parsed.prefixTokens === "number" ? parsed.prefixTokens : 0,
       at: typeof parsed.ts === "number" ? parsed.ts : 0,
@@ -360,6 +383,7 @@ type FetchLike = (input: Any, init?: Any) => Promise<unknown>;
 export function buildCheckFetch(
   wireTools: Any,
   capture: { url?: string; bodyText?: string },
+  wireParams?: Record<string, unknown>,
 ): FetchLike {
   const realFetch: FetchLike = globalThis.fetch;
   return async (input, init) => {
@@ -369,6 +393,20 @@ export function buildCheckFetch(
       const parsed = bodyText ? (JSON.parse(bodyText) as Any) : null;
       if (parsed && Array.isArray(wireTools)) {
         parsed.tools = wireTools;
+      }
+      // Restore the request-level parameters of the last real request
+      // (chat_template_kwargs, max_tokens, sampling, store, ...). The
+      // provider renders the chat template from these values, so a
+      // different one changes the token sequence and no prefix cache can
+      // match; some providers also key their prefix cache on them
+      // (measured: FastLLM returns cached=0 when max_tokens differs even
+      // with a byte-identical message prefix). model/messages/tools are
+      // owned by the engine and never overwritten here.
+      if (parsed && wireParams && typeof wireParams === "object") {
+        for (const [key, value] of Object.entries(wireParams)) {
+          if (key === "model" || key === "messages" || key === "tools") continue;
+          parsed[key] = value;
+        }
       }
       if (parsed) {
         out = { ...(init as object), body: JSON.stringify(parsed) };
@@ -549,6 +587,50 @@ function extractSection(draft: string, header: string): string {
 // The check loop
 // ────────────────────────────────────────────────────────────────────────────
 
+/**
+ * The assistant message that closed the last real request — the reply the
+ * server already generated and already holds in its slot KV. The check
+ * request appends it between the snapshot and the tail instruction so the
+ * wire body is a strict continuation of what the server last processed
+ * (the same relationship the server's KV reuse recognizes between normal
+ * turns: request N+1 = request N's context + its reply + new user message).
+ * Without it, the check prefix diverges from the slot's stored
+ * (prompt + reply) sequence and the server prefills the whole prefix even
+ * though the leading messages are byte-identical.
+ * Returns null when there is nothing to continue: no last assistant in the
+ * session, or the last one is already part of the snapshot's context (the
+ * turn was aborted before its reply was appended — nothing new to reuse).
+ */
+export function snapshotContinuationAssistant(ctx: Any): Any | null {
+  if (!snapshot?.messages?.length) return null;
+  let branch: Any[] = [];
+  try {
+    branch = ctx?.sessionManager?.getBranch?.() ?? [];
+  } catch {
+    return null;
+  }
+  let lastAssistant: Any = null;
+  for (let i = branch.length - 1; i >= 0; i--) {
+    const entry = branch[i];
+    if (entry?.type === "message" && entry.message?.role === "assistant") {
+      lastAssistant = entry.message;
+      break;
+    }
+  }
+  if (!lastAssistant) return null;
+  const canon = (m: Any) => JSON.stringify({ role: m?.role, content: m?.content });
+  const json = canon(lastAssistant);
+  const snapMsgs = snapshot.messages as Any[];
+  for (let i = snapMsgs.length - 1; i >= 0; i--) {
+    const msg = snapMsgs[i];
+    if (msg?.role === "assistant") {
+      // Same reply the snapshot already carries — nothing new to continue.
+      return canon(msg) === json ? null : lastAssistant;
+    }
+  }
+  return lastAssistant;
+}
+
 interface Usage {
   input: number;
   output: number;
@@ -616,10 +698,16 @@ async function runCheckLoop(args: {
     customInstructions,
   });
 
+  const continuation = snapshotContinuationAssistant(ctx);
   const messages: Any[] = [
     ...(snapshot?.messages ?? []),
+    // The last real request's own reply (if the session has one beyond the
+    // snapshot): makes the check body a strict continuation of what the
+    // server last processed, so its slot KV is reused instead of prefilled.
+    ...(continuation ? [continuation] : []),
     { role: "user", content: [{ type: "text", text: instruction }], timestamp: Date.now() },
   ];
+  if (continuation) log("continuation", { appended: true });
 
   const tools = snapshot?.tools;
   // Fail closed: without the last request's tools the check request cannot
@@ -657,7 +745,7 @@ async function runCheckLoop(args: {
         {
           maxTokens: capTokens,
           signal: controller.signal,
-          fetch: buildCheckFetch(snapshot?.wireTools, checkCapture),
+          fetch: buildCheckFetch(snapshot?.wireTools, checkCapture, snapshot?.wireParams),
         },
       );
     } finally {
@@ -1004,6 +1092,7 @@ export const __internals = {
   fail,
   persistSnapshot,
   restoreSnapshot,
+  snapshotContinuationAssistant,
   _testSetPhase: (p: Phase | null) => {
     phase = p;
   },

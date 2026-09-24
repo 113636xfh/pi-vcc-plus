@@ -17,6 +17,8 @@ import { type Logger } from "../src/log";
 
 const { buildCheckFetch, verifyCheckPrefix, readWireBaseline, runCheckLoop, _testSetPhase, _testSetSnapshot } = __internals;
 
+type Any = any;
+
 const WIRE_TOOLS = [
   { name: "t1", description: "d1", input_schema: { type: "object" }, cache_control: { type: "ephemeral" } },
   { name: "t2", description: "d2", input_schema: { type: "object" } },
@@ -99,6 +101,55 @@ describe("buildCheckFetch", () => {
     await expect(fetch("u", { body: "{ not json" })).resolves.toBeDefined();
     expect((fetchCalls[0]!.init as { body: string }).body).toBe("{ not json");
     expect(capture.bodyText).toBe("{ not json");
+  });
+
+  test("restores the last real request's wire parameters (the prefix-cache key)", async () => {
+    fetchCalls.length = 0;
+    const capture: { url?: string; bodyText?: string } = {};
+    // What the provider saw on the last real request: thinking enabled, full
+    // output budget, store=false. The check call would otherwise send
+    // enable_thinking:false + max_tokens:capTokens and lose every cache hit.
+    const wireParams = {
+      max_tokens: 32768,
+      store: false,
+      stream: true,
+      stream_options: { include_usage: true },
+      chat_template_kwargs: { enable_thinking: true, preserve_thinking: true },
+    };
+    const fetch = buildCheckFetch(WIRE_TOOLS, capture, wireParams);
+    const outgoing = {
+      model: "m",
+      max_tokens: 26214,
+      store: false,
+      messages: [{ role: "user", content: "x" }],
+      tools: RECONSTRUCTED_TOOLS,
+      chat_template_kwargs: { enable_thinking: false, preserve_thinking: true },
+    };
+    await fetch("u", { method: "POST", body: JSON.stringify(outgoing) });
+
+    const got = bodyOf(0);
+    expect(got.max_tokens).toBe(32768);
+    expect(got.chat_template_kwargs).toEqual({ enable_thinking: true, preserve_thinking: true });
+    expect(JSON.parse(JSON.stringify(got.tools))).toEqual(WIRE_TOOLS);
+    expect(got.messages).toEqual(outgoing.messages); // engine-owned, untouched
+    expect(got.model).toBe("m");
+  });
+
+  test("wireParams never overwrite model/messages/tools", async () => {
+    fetchCalls.length = 0;
+    const fetch = buildCheckFetch(WIRE_TOOLS, {}, {
+      model: "EVIL",
+      messages: [{ role: "user", content: "EVIL" }],
+      tools: [{ name: "EVIL" }],
+      max_tokens: 7,
+    });
+    const outgoing = { model: "m", messages: [{ role: "user", content: "x" }], tools: RECONSTRUCTED_TOOLS };
+    await fetch("u", { body: JSON.stringify(outgoing) });
+    const got = bodyOf(0);
+    expect(got.model).toBe("m");
+    expect(got.messages).toEqual(outgoing.messages);
+    expect(JSON.parse(JSON.stringify(got.tools))).toEqual(WIRE_TOOLS);
+    expect(got.max_tokens).toBe(7); // ordinary parameter is restored
   });
 });
 
@@ -591,6 +642,129 @@ describe("runCheckLoop: check-request byte verification (integration)", () => {
     expect(checkPrefix!.fetchCalled).toBe(true);
     expect(String(checkPrefix!.reason)).toContain("no JSON body string");
     _testSetPhase(null);
+    _testSetSnapshot(null);
+  });
+
+  test("continuation: the last session assistant beyond the snapshot is inserted before the tail", async () => {
+    const reply = {
+      role: "assistant",
+      content: [{ type: "text", text: "R's reply" }],
+      api: "test",
+      provider: "test",
+      model: "test",
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: "end",
+      timestamp: 0,
+    };
+    let capturedRoles: string[] = [];
+    let capturedAssistant: any = null;
+    _testSetPhase(freshPhase());
+    _testSetSnapshot(snapWith({}));
+    const { log, entries } = captureLog();
+    const ctx = {
+      cwd: scratch,
+      hasUI: false,
+      ui: { notify: () => {} },
+      sessionManager: {
+        getBranch: () => [
+          { type: "message", message: u1 },
+          { type: "message", message: reply },
+        ],
+      },
+      modelRegistry: {
+        complete: async (_m: unknown, context: unknown, _options: { fetch: unknown }) => {
+          // copy at call time — the loop mutates the same array afterwards
+          const msgs = ((context as any).messages as any[]).map((m) => ({ ...m }));
+          capturedRoles = msgs.map((m) => m.role);
+          capturedAssistant = msgs[1];
+          return doneResponse();
+        },
+      },
+    } as any;
+    await runCheckLoop({
+      ctx,
+      model: { maxTokens: 4096 },
+      cfg: structuredClone(DEFAULTS),
+      signal: undefined,
+      capTokens: 10_000,
+      charsPerToken: 4,
+      reserveTokens: 16384,
+      log,
+    });
+    expect(capturedRoles).toEqual(["user", "assistant", "user"]);
+    expect(capturedAssistant).toEqual(reply);
+    expect(entries.some(([n]) => n === "continuation")).toBe(true);
+    _testSetPhase(null);
+    _testSetSnapshot(null);
+  });
+
+  test("continuation: no insertion when the last assistant is already in the snapshot", async () => {
+    const reply = {
+      role: "assistant",
+      content: [{ type: "text", text: "old reply" }],
+      timestamp: 0,
+    };
+    let capturedRoles: string[] = [];
+    _testSetPhase(freshPhase());
+    _testSetSnapshot(snapWith({ messages: [u1, reply] }));
+    const { log, entries } = captureLog();
+    const ctx = {
+      cwd: scratch,
+      hasUI: false,
+      ui: { notify: () => {} },
+      sessionManager: {
+        getBranch: () => [
+          { type: "message", message: u1 },
+          { type: "message", message: { ...reply, timestamp: 999 } },
+        ],
+      },
+      modelRegistry: {
+        complete: async (_m: unknown, context: unknown, _options: { fetch: unknown }) => {
+          capturedRoles = ((context as any).messages as any[]).map((m) => m.role);
+          return doneResponse();
+        },
+      },
+    } as any;
+    await runCheckLoop({
+      ctx,
+      model: { maxTokens: 4096 },
+      cfg: structuredClone(DEFAULTS),
+      signal: undefined,
+      capTokens: 10_000,
+      charsPerToken: 4,
+      reserveTokens: 16384,
+      log,
+    });
+    expect(capturedRoles).toEqual(["user", "assistant", "user"]);
+    expect(entries.some(([n]) => n === "continuation")).toBe(false);
+    _testSetPhase(null);
+    _testSetSnapshot(null);
+  });
+
+  test("snapshotContinuationAssistant: unit cases", () => {
+    const { snapshotContinuationAssistant } = __internals;
+    const reply = { role: "assistant", content: [{ type: "text", text: "R's reply" }], timestamp: 5 };
+    const ctxFor = (entries: unknown[]) => ({
+      cwd: scratch,
+      sessionManager: { getBranch: () => entries },
+    });
+    // no snapshot
+    _testSetSnapshot(null);
+    expect(snapshotContinuationAssistant(ctxFor([{ type: "message", message: reply }]))).toBeNull();
+    // no assistant in session / no sessionManager
+    _testSetSnapshot(snapWith({}));
+    expect(snapshotContinuationAssistant(ctxFor([]))).toBeNull();
+    expect(snapshotContinuationAssistant(ctxFor([{ type: "message", message: u1 }]))).toBeNull();
+    expect(snapshotContinuationAssistant({ cwd: scratch })).toBeNull();
+    // last assistant beyond the snapshot
+    expect(
+      snapshotContinuationAssistant(
+        ctxFor([{ type: "message", message: u1 }, { type: "message", message: reply }]),
+      ),
+    ).toEqual(reply);
+    // last assistant already carried by the snapshot (timestamp/extra fields ignored)
+    _testSetSnapshot(snapWith({ messages: [u1, { role: "assistant", content: reply.content, timestamp: 77, api: "x" }] }));
+    expect(snapshotContinuationAssistant(ctxFor([{ type: "message", message: reply }]))).toBeNull();
     _testSetSnapshot(null);
   });
 
