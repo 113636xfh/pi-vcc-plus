@@ -44,8 +44,10 @@ interface Snapshot {
   wireParams?: Record<string, unknown>;
   /** "mismatch" = the wire tools contain shapes that cannot be reconstructed
    * byte-exactly (grammar/custom tools, strict: true, deferred loading, or an
-   * unrecognized shape) — the check request must fail closed. */
-  toolsRoundTrip?: "ok" | "mismatch";
+   * unrecognized shape) — the check request must fail closed.
+   * "unknown" = the snapshot was rebuilt from the session (cold start), so no
+   * wire payload was seen: pi-ai re-serializes the tools itself. */
+  toolsRoundTrip?: "ok" | "mismatch" | "unknown";
   prefixTokens: number;
   at: number;
 }
@@ -223,6 +225,68 @@ export function restoreSnapshot(ctx: Any): boolean {
       prefixTokens: typeof parsed.prefixTokens === "number" ? parsed.prefixTokens : 0,
       at: typeof parsed.ts === "number" ? parsed.ts : 0,
     };
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Tools for a rebuilt snapshot. `toolsFromPayload` needs a wire payload, which
+ * a cold start does not have; the extension entry point injects pi's own tool
+ * registry here instead (getActiveTools + getAllTools).
+ */
+type ToolProvider = () => Any[];
+let toolProvider: ToolProvider | null = null;
+
+export function setToolProvider(provider: ToolProvider): void {
+  toolProvider = provider;
+}
+
+/**
+ * Cold start without any snapshot: the extension was just loaded (/reload, new
+ * process, or a project where it never saw a request) and the last provider
+ * request is unknown. Refusing to compact is the wrong answer for a session
+ * that already has plenty of context, so rebuild what a snapshot needs from the
+ * session itself:
+ *
+ *  - messages: the session's own projection (exactly what the next request
+ *    would send), passed through the same convertToLlm + blockImages transform
+ *    as recordContext;
+ *  - system prompt: ctx.getSystemPrompt();
+ *  - tools: pi's active tool registry, in pi-ai's Tool shape.
+ *
+ * What is missing is what only the wire payload knows: the exact wire tool
+ * order/shape (pi-ai re-serializes the same way for a request it builds) and
+ * the request-level parameters (chat_template_kwargs, max_tokens, ...). Logged
+ * as a rebuilt snapshot so the check request's prefix status stays visible: the
+ * round-1 `prefixSuspect` flag and the prefix-sentinel both report a miss if
+ * re-serialization diverged.
+ */
+export function rebuildSnapshotFromSession(ctx: Any): boolean {
+  if (snapshot?.tools?.length) return false; // a real one exists
+  const manager = ctx?.sessionManager;
+  if (typeof manager?.buildSessionProjection !== "function") return false;
+  try {
+    const projected: Any[] = manager.buildSessionProjection()?.messages ?? [];
+    if (!projected.length) return false;
+    const converted = convertToLlm(projected as Any) as Any[];
+    const messages = isBlockImagesEnabled(ctx?.cwd) ? blockImageMessages(converted) : converted;
+    const tools = toolProvider?.() ?? [];
+    if (!tools.length) return false; // without tools the model cannot patch at all
+    const systemPrompt = safeSystemPrompt(ctx);
+    snapshot = {
+      messages,
+      systemPrompt,
+      tools,
+      toolsSource: "rebuilt from the session (cold start)",
+      toolsRoundTrip: "unknown",
+      prefixTokens:
+        Math.ceil(roughChars(messages) / 4) + Math.ceil((systemPrompt?.length ?? 0) / 4),
+      at: Date.now(),
+    };
+    // Best effort: a later /reload can restore this one instead of rebuilding.
+    persistSnapshot(typeof ctx?.cwd === "string" ? ctx.cwd : undefined, safeSessionId(ctx));
     return true;
   } catch {
     return false;
@@ -963,12 +1027,24 @@ export async function onBeforeCompact(event: Any, ctx: Any, cfg: Config): Promis
   if (!snapshot?.messages?.length) {
     // Cold start: module state died with the previous process (e.g. /reload).
     // Reuse the last complete snapshot persisted for this session, if one
-    // exists; otherwise fall through to the fail-closed check below.
+    // exists; otherwise fall through to the cold-start rebuild below.
     if (restoreSnapshot(ctx)) {
       log("snapshot_restored", {
         at: snapshot?.at ?? 0,
         tools: snapshot?.tools?.length ?? 0,
         toolsRoundTrip: snapshot?.toolsRoundTrip,
+      });
+    } else if (rebuildSnapshotFromSession(ctx)) {
+      // Cold start: no request observed yet in this process, none persisted for
+      // this session. Rebuilt from the session so /compact works instead of
+      // failing closed; the missing wire details are logged and show up as a
+      // prefixSuspect round if they actually broke the prefix.
+      log("snapshot_rebuilt", {
+        messages: snapshot?.messages?.length ?? 0,
+        tools: snapshot?.tools?.length ?? 0,
+        systemPromptChars: snapshot?.systemPrompt?.length ?? 0,
+        prefixTokens: snapshot?.prefixTokens ?? 0,
+        note: "no wire snapshot available: wire tool order/shape and request-level parameters are unknown",
       });
     }
   }
@@ -977,15 +1053,15 @@ export async function onBeforeCompact(event: Any, ctx: Any, cfg: Config): Promis
     // Without the last-request snapshot the check request cannot reuse the
     // prefix at all (no system prompt, no tools) — fail closed instead of
     // sending a one-message request that silently abandons the design.
-    // Remaining trigger: a brand-new session with no provider request yet
-    // (nothing persisted to restore).
+    // Reached only when even the session has nothing to rebuild from: an empty
+    // session, or pi's ctx not exposing the session projection/tools.
     log("abort", { why: "no snapshot of the last provider request yet" });
     return fail(
       cfg,
       ctx,
       log,
       reason,
-      "no snapshot of the last provider request yet (nothing persisted to restore either). Send one normal message first, then run /compact again",
+      "no snapshot of the last provider request yet, and the session has nothing to rebuild one from (empty session, or pi did not expose the session projection/tools). Send one normal message first, then run /compact again",
       prep,
     );
   }
@@ -1116,6 +1192,8 @@ export const __internals = {
   fail,
   persistSnapshot,
   restoreSnapshot,
+  rebuildSnapshotFromSession,
+  setToolProvider,
   snapshotContinuationAssistant,
   _testSetPhase: (p: Phase | null) => {
     phase = p;

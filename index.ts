@@ -22,6 +22,7 @@ import {
   onBeforeCompact,
   recordContext,
   recordPayload,
+  setToolProvider,
   toolDone,
   toolDraft,
   toolPatch,
@@ -96,6 +97,25 @@ export default async function piVccPlus(pi: ExtensionAPI): Promise<void> {
   });
   pi.on("before_provider_request", async (event: any, ctx: any) => {
     recordPayload(event?.payload, ctx);
+  });
+
+  // Cold-start fallback: when no wire snapshot exists (fresh /reload, new
+  // process) the engine rebuilds one from the session, and needs pi's own tool
+  // registry for that — the active tools in pi-ai's Tool shape.
+  setToolProvider(() => {
+    try {
+      const active = new Set<string>((pi as any).getActiveTools?.() ?? []);
+      const all: any[] = (pi as any).getAllTools?.() ?? [];
+      return all
+        .filter((tool) => tool?.name && (active.size === 0 || active.has(tool.name)))
+        .map((tool) => ({
+          name: tool.name,
+          description: tool.description ?? "",
+          parameters: tool.parameters,
+        }));
+    } catch {
+      return [];
+    }
   });
 
   // Constant mechanism block — same string on every run keeps the prefix stable.

@@ -58,7 +58,8 @@ fail-closed 的边界（全部在 `src/engine.ts`）：
 | 快照里没有 tools（payload 拿不到） | 抛错——没有 tools 的检查请求既无法复用前缀，模型也看不到 `vcc_*` |
 | 快照 `toolsRoundTrip` 为 `mismatch`（wire tools 含 grammar/custom 形状、`strict: true`、`defer_loading` 或未知形状） | 抛错——这些形状来自 wire 不携带的 `constrainedSampling`/延迟加载状态，无法逐字节重建，宁可失败也不用降级 tools 破坏前缀 |
 | `recordContext` 构建快照失败 | 快照置 null，下个 compaction 走失败策略——旧快照会静默破坏前缀不变量 |
-| 还没有任何快照（会话首个请求前就压缩） | 走失败策略——单条消息请求没有 system/tools，前缀复用直接作废 |
+| 没有内存快照（`/reload` / 新进程 / 新项目） | 先读同会话的持久化快照（`restoreSnapshot`，同会话+完整+非 mismatch）；没读到则 `rebuildSnapshotFromSession` 从会话自身重建（messages 取 `buildSessionProjection()` → `convertToLlm` → blockImages，system 取 `ctx.getSystemPrompt()`，tools 取 `pi.getAllTools()` 的活跃项），记 `snapshot_rebuilt`；tools 拿不到或会话为空才抛错（没有 tools 模型无法调 `vcc_patch`） |
+| 还没有任何快照且会话也重建不出（空会话 / ctx 未暴露 projection / 无 tools） | 走失败策略——单条消息请求没有 system/tools，前缀复用直接作废 |
 | 模型全程没调 `vcc_done` | 默认：警告 + 接受当前草稿（只被 P4 校验过的补丁改过，状态安全）；`guards.requireDone: true` 时升级为失败 |
 | 空 `changes` 补丁 | 同样过 P4 上限检查（不放过已超限的草稿） |
 
@@ -85,7 +86,8 @@ assistant 正文。每次剥离写一行 `finalize` 日志（`stripped*` / `rena
 
 ## 目录与职责
 
-- `index.ts`：注册系统块、三个工具、`context` / `before_provider_request` 快照钩子、压缩接管。
+- `index.ts`：注册系统块、三个工具、`context` / `before_provider_request` 快照钩子、压缩接管，
+  并向引擎注入 `setToolProvider`（冷启动重建快照时用 `pi.getActiveTools()` ∩ `pi.getAllTools()`）。
   配置只在加载时读一次（改 `config.json` 需 `/reload`）——中途变更会改变系统块、破坏前缀不变量。
 - `src/vcc.ts`：解析并加载**上游** pi-vcc（仓库内 submodule → 显式路径 → 环境变量 → npm 安装位置），
   并记录加载到的版本与路径到日志（`vcc_loaded`）。我们从不修改它。

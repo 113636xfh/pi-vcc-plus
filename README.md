@@ -220,16 +220,21 @@ third_party/pi-vcc/      上游 pi-vcc（git submodule，锁定版本）
 
 `~/.pi/agent/vcc-plus/log/<sessionId>.jsonl`：`vcc_loaded`、`draft`、`checkPrefix`、
 `round`（含 `cacheRead`、`expectedPrefixTokens`、`prefixSuspect`、`toolsSource`）、
-`tool`、`summary_final`、`snapshot_restored`、`fail_closed`。
+`tool`、`summary_final`、`snapshot_restored`、`snapshot_rebuilt`、`finalize`、`fail_closed`。
 
 **首次实测要看的一条**：`round.prefixSuspect` 必须为 false（即 `cacheRead ≈ 前缀长度`），
 否则说明前文被改动了，前缀复用没有成立。
 
 ## 已知限制
 
-- **冷启动**：快照只在扩展观察到新 provider 请求之后建立。`/reload`（或新进程）后 `/compact`
-  会先尝试从持久化快照恢复（同会话 + 完整 + round-trip 通过），恢复不了才 fail-closed——
-  只有全新会话（从未有过 provider 请求）需要先发一条普通消息；
+- **冷启动**：快照只在扩展观察到新 provider 请求之后建立。`/reload`（或新进程、或从未有过请求的项目）后 `/compact`
+  按三级降级：① 内存快照 → ② 同会话的持久化快照（`同会话 + 完整 + round-trip 通过`）→
+  ③ **从会话本身重建**（消息取 pi 的 session projection，system 取 `ctx.getSystemPrompt()`，
+  tools 取 `pi.getAllTools()` 里的活跃工具），日志记 `snapshot_rebuilt`。重建缺的只有 wire 才能知道的东西——
+  wire tools 的逐字节形状/顺序与请求级参数（`chat_template_kwargs`、`max_tokens`……）——但 pi-ai 自己序列化
+  tools 与真实请求一致，所以检查请求仍然可用；若真的分叉了，round 1 的 `prefixSuspect` 与哨兵都会报出来（非静默）。
+  只有三种情况才 fail-closed：会话为空、pi 没暴露 session projection、或拿不到任何 tools（没有 tools 模型就无法打补丁；
+  请先发一条普通消息再 `/compact`）；
 - 检查请求由扩展直接用 `ModelRegistry.complete` 发出（不走 Agent 流式路径），
   `before_provider_request` 等钩子对它不触发——所以它的字节一致性由扩展自己的
   fetch 拦截验证（B 面）；钩子层的观测插件对它不可见（wire 层的全局 fetch 包装仍可见）；
