@@ -821,6 +821,46 @@ describe("runCheckLoop: check-request byte verification (integration)", () => {
     }
   });
 
+  test("runCheckLoop returns the sections only (transcript stripped at finalize)", async () => {
+    const cwd = join(scratch, "finalize-loop");
+    mkdirSync(cwd, { recursive: true });
+    setup(cwd, [u1], RECONSTRUCTED_TOOLS);
+    const phase = freshPhase();
+    phase.draft = [
+      "[Session Goal]",
+      "- g",
+      "",
+      "---",
+      "",
+      "Use `vcc_recall` to search for prior work, decisions, and context from before this summary. Do not redo work already completed.",
+      "",
+      "[assistant]",
+      '* edit "src/x.ts" (#12)',
+      "",
+      "[user]",
+      "？",
+    ].join("\n");
+    _testSetPhase(phase);
+    _testSetSnapshot(snapWith({}));
+    const { log, entries } = captureLog();
+    const result = await runCheckLoop({
+      ctx: ctxWithCwd(cwd, async () => doneResponse()),
+      model: { maxTokens: 4096 },
+      cfg: structuredClone(DEFAULTS),
+      signal: undefined,
+      capTokens: 10_000,
+      charsPerToken: 4,
+      reserveTokens: 16384,
+      log,
+    });
+    expect(result.summary).toBe("[Session Goal]\n- g");
+    const finalize = entries.find(([name]) => name === "finalize");
+    expect(Number(finalize?.[1].strippedTranscriptLines)).toBeGreaterThan(0);
+    expect(Number(finalize?.[1].strippedNotes)).toBe(1);
+    _testSetPhase(null);
+    _testSetSnapshot(null);
+  });
+
   afterAll(() => {
     rmSync(scratch, { recursive: true, force: true });
   });
