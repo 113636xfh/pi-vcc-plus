@@ -21,7 +21,10 @@ pi-vcc-plus produces the summary a different way:
    mechanical extraction: deterministic, zero model calls, milliseconds;
 2. **The model only patches** — a single instruction is appended to the end of
    the current session, and the model edits the draft in place with
-   `vcc_patch` (multiple rounds allowed);
+   `vcc_delete` (by line number) / `vcc_add` (by section name) (multiple rounds
+   allowed) — the model sees the sections region as a numbered view (`NNN | line`),
+   the transcript is unnumbered and read-only, and every call returns a full diff of
+   what it removed, line numbers included;
 3. **The prefix is untouched, byte for byte** — the check request = the previous
    real request verbatim (system + tools + messages) + the tail instruction, so
    the prefix is byte-identical and the server-side KV cache must be reused.
@@ -38,7 +41,7 @@ v0.8.0, git submodule `third_party/pi-vcc` @ `303e89d`):
 | | pi-vcc (upstream) | pi-vcc-plus (this extension) |
 |---|---|---|
 | Draft generation | Mechanical extraction algorithm (structure, budget anchor, calibration) | Reuses upstream — never copied or modified (reads its source directly) |
-| Model involvement | None (pure algorithm) | Check loop: in-place correction via `vcc_patch` / `vcc_draft` / `vcc_done` |
+| Model involvement | None (pure algorithm) | Check loop: in-place correction via `vcc_delete` / `vcc_add` / `vcc_draft` / `vcc_done` |
 | Prefix stability | Not handled | Snapshot reuse + byte-level re-verification + fail-closed |
 | History recall | `vcc_recall` (reads raw JSONL) | Registered by default (can be disabled) |
 
@@ -173,7 +176,7 @@ lines, 3 `---` lines, 2 notes and 1 omitted marker removed;
 |---|---|
 | Missing snapshot | Brand-new session with no provider request yet (after `/reload` a persisted snapshot is restored first; only brand-new sessions need one normal message first) |
 | tools unavailable / mismatched | No wire tools available; wire tools contain grammar/custom, `strict: true`, or `defer_loading` |
-| Patch validation failed | P1–P4: oldText not found / not unique, over budget, consecutive failures exceeded |
+| Patch validation failed | line number out of range / pointing at a header or the transcript / deleted twice; append over budget; consecutive failures exceeded |
 | Model error | API error, abort, plain-text finish with `requireDone`, round / draft-read limits |
 
 Default policy `onFailure: auto`: manual `/compact` → throw; automatic
@@ -261,7 +264,7 @@ source**; we never modify it):
 
 ```powershell
 bun run typecheck                            # tsc --noEmit (strict)
-bun test test/                              # P1–P4 unit tests + check-loop regression + recall loading
+bun test test/                              # edit-rule unit tests + check-loop regression + recall loading
 bun run test/draft-smoke.ts <session.jsonl>  # offline draft from a real session (no model calls)
 node scripts/e2e-rpc-compact-test.mjs        # RPC E2E: seed a short session -> three turns -> /compact
 node scripts/e2e-rpc-compact-resume.mjs      # resume the compacted session -> ask -> second /compact

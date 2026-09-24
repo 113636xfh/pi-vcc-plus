@@ -77,8 +77,9 @@ This extension takes over context compaction. The flow is:
 1. When compaction is needed, a script first extracts this conversation into a mechanical
    "compaction draft" and appends it to the end of the conversation. The draft is not a user
    message: do not comment on it, restate it, or reply to it.
-2. The "compaction check phase" then begins: correct the draft with vcc_patch, use vcc_draft
-   when you need to see the current full draft, and call vcc_done when you are finished.
+2. The "compaction check phase" then begins: correct the draft with vcc_delete (drop lines by
+   regex) and vcc_add (append lines to a named section), use vcc_draft when you need to see the
+   current full draft, and call vcc_done when you are finished.
 3. These three tools are only usable during the compaction check phase; calling them at any
    other time is rejected.
    Separately, vcc_recall (shipped with pi-vcc) stays available in normal turns whenever you

@@ -6,7 +6,7 @@
    且请求级参数（`chat_template_kwargs`、`max_tokens`、`store`、采样参数……）沿用上一次请求的值；
    合起来才是“与上一次请求严格连续”的请求体，服务端才肯按前缀命中。
    `round.prefixSuspect` 是对这条不变量的运行时断言（前缀逐字节相同但参数/渲染不同 → 仍然 miss）。
-2. **草稿由算法产出，模型只做增删改**：结构、文件清单、长度由 VCC 保证；模型通过 `vcc_patch` 修正。
+2. **草稿由算法产出，模型只做增删改**：结构、文件清单、长度由 VCC 保证；模型按行号 `vcc_delete`、按节名 `vcc_add` 修正。
 3. **不新增并发**：不起后台 worker、不发独立摘要请求；所有模型调用都在当前会话内顺序发生。
 
 ## 为什么这么切
@@ -19,7 +19,7 @@
 | 拼上“上一次请求关尾的那条 assistant 回复”（`snapshotContinuationAssistant`） | 服务端 slot 里存的是“上一次请求的 prompt + 它生成的回复”。检查请求缺了这条回复，token 流就在快照结尾处与 slot 序列分叉——实测 FastLLM prefix cache 直接给 0 命中、全量重 prefill（~204K token / 10 分钟）。补上它，两者关系与正常轮次之间完全一致（会话里已有该条目，序列化走同一条 pi-ai 通路）；若快照里已有同内容 assistant（生成被中断等），不重复拼 |
 | 请求级参数也沿用上一次请求 | `chat_template_kwargs` 参与**服务端 chat 模板渲染**：agent 轮次 `enable_thinking: true`，`complete()` 发出的检查请求默认 `false`，同一段历史渲染出的 token 就不同（实测 2.9K 的 prompt 差 36 token）→ 前缀再逐字节相同也命不中；另外部分服务端（实测 FastLLM）把 `max_tokens` 也算进缓存键。自定义 fetch 在替换 tools 之外，把捕获到的请求级参数（除 `model`/`messages`/`tools`）写回出站 body |
 | 检查用"打补丁"而不是"重写摘要" | 模型无法破坏 VCC 的结构；失败可定位到行；`oldText` 唯一匹配的语义与原生 edit 一致，模型最熟练 |
-| 只用 `vcc_patch` / `vcc_draft` / `vcc_done` | 校验阶段给模型一个封闭的动作空间；`vcc_draft` 仅在 diff 不足以判断时使用 |
+| 只用 `vcc_delete` / `vcc_add` / `vcc_draft` / `vcc_done` | 校验阶段给模型一个封闭的动作空间；`vcc_draft` 仅在 diff 不足以判断时使用 |
 | 上限用 `min(0.8 × reserveTokens, model.maxTokens)` | 与 pi 原生摘要完全相同的预算公式；写进提示词，并由 P4 校验（同一个取值来源） |
 | 护栏只用计数（轮次/失败次数/draft 读取次数） | 慢模型单次调用几十秒很正常，用时间判断会误杀 |
 | 校验请求的字节级复核（B 面，自验证） | 校验请求走 `ModelRegistry.complete` → `runtime.complete`，**不经过** Agent 的 `onPayload`，哨兵看不到它；所以 pi-vcc-plus 自己的 fetch 拦截：tools 原样替换 + 首次出站 body 与上一次真实请求的 wire body 前缀比较（基线要求 `ts ≥ 快照时刻`、取较新者、平手优先哨兵，旧残留不会误报），结果写 `checkPrefix` 日志、完整 body 写 `.pi/prefix-sentinel/check-request.json`；第 1 轮必有一行 `checkPrefix`，验不到也是可见状态（`identical: null` + `reason`） |
@@ -33,19 +33,23 @@
 | 系统提示词块（常量，会话开始即固定） | 流程是什么、什么叫"压缩校验阶段"、三个工具的定位 | `src/config.ts` `SYSTEM_BLOCK` |
 | 工具 description | 什么时候能用、用法同 edit | `src/prompt.ts` `DESC_*` + `index.ts` |
 | 压缩时注入的尾部消息 | 草稿、预算、重点补什么、行为约束 | `src/prompt.ts` `buildTailInstruction()` |
-| 工具回执与错误 | 完整 diff 回执、P1–P4 错误 | `src/prompt.ts` `buildDiffReceipt()` / `ERR_*` |
+| 工具回执与错误 | 完整 diff 回执、行号/节名校验错误 | `src/prompt.ts` `buildDiffReceipt()` / `ERR_*` |
 
 尾部指令里"重点补什么"那五条不是拍脑袋，来自实测（见 `docs/vcc-vs-native-notes.md`）：
 VCC 的 brief 强于文件/命令/最近对话，最容易丢约束、决策理由、环境细节、未完成项与失败事实。
 
-## 校验规则（P1–P4）与护栏
+## 编辑规则与护栏
 
 | # | 规则 | 失败处理 |
 |---|---|---|
-| P1 | `oldText` 唯一精确匹配 | 返回 edit 风格错误，模型就地重试 |
-| P2 | `oldText` 非空 | 同上 |
-| P3 | 覆盖 section 名（`[...]`）时 `newText` 必须保留它 | 同上 |
-| P4 | 应用后总长 ≤ 上限 | 提示超限并重做 |
+| D1 | `vcc_delete` 的行号必须在章节区内（1..N）、不能指向区外（转录区不编号、只读）、不能是章节标题行、不能重复 | 返回带原因的错误（行号范围 / 读转录 / 标题 / 重复），模型就地重试 |
+| D2 | 行号是**当次调用前**的编号；删除后后面的行号会前移 | 提示词要求重新用 `vcc_draft` 取号再删 |
+| A1 | `vcc_add` 的 `lines` 非空；节名按 `finalizeSummary` 的同一套路由解析（别名归一到规范节），缺失的节在章节区末尾新建 | 空行/空节名报错；新建位置固定在转录区**之前** |
+| A2 | `replace:true` 先清空该节的 bullet（标题保留），再追加 | 与 D1/A1 同一套原子应用 |
+| P4 | 应用后总长 ≤ 上限（按**剥离后**的正文计） | 提示超限并重做 |
+
+护栏：轮次 ≤ 8、连续失败 ≤ 4、`vcc_draft` ≤ 3、同一签名连续失败 2 次给提示；
+用户中断立即停止；`callTimeoutMs > 0` 时才启用单轮超时（默认 0）。
 
 护栏：轮次 ≤ 8、连续失败 ≤ 4、`vcc_draft` ≤ 3、同一 `oldText` 连续失败 2 次给提示；
 用户中断立即停止；`callTimeoutMs > 0` 时才启用单轮超时（默认 0）。
@@ -58,10 +62,11 @@ fail-closed 的边界（全部在 `src/engine.ts`）：
 | 快照里没有 tools（payload 拿不到） | 抛错——没有 tools 的检查请求既无法复用前缀，模型也看不到 `vcc_*` |
 | 快照 `toolsRoundTrip` 为 `mismatch`（wire tools 含 grammar/custom 形状、`strict: true`、`defer_loading` 或未知形状） | 抛错——这些形状来自 wire 不携带的 `constrainedSampling`/延迟加载状态，无法逐字节重建，宁可失败也不用降级 tools 破坏前缀 |
 | `recordContext` 构建快照失败 | 快照置 null，下个 compaction 走失败策略——旧快照会静默破坏前缀不变量 |
-| 没有内存快照（`/reload` / 新进程 / 新项目） | 先读同会话的持久化快照（`restoreSnapshot`，同会话+完整+非 mismatch）；没读到则 `rebuildSnapshotFromSession` 从会话自身重建（messages 取 `buildSessionProjection()` → `convertToLlm` → blockImages，system 取 `ctx.getSystemPrompt()`，tools 取 `pi.getAllTools()` 的活跃项），记 `snapshot_rebuilt`；tools 拿不到或会话为空才抛错（没有 tools 模型无法调 `vcc_patch`） |
+| 没有内存快照（`/reload` / 新进程 / 新项目） | 先读同会话的持久化快照（`restoreSnapshot`，同会话+完整+非 mismatch）；没读到则 `rebuildSnapshotFromSession` 从会话自身重建（messages 取 `buildSessionProjection()` → `convertToLlm` → blockImages，system 取 `ctx.getSystemPrompt()`，tools 取 `pi.getAllTools()` 的活跃项），记 `snapshot_rebuilt`；tools 拿不到或会话为空才抛错（没有 tools 模型无法调 `vcc_delete` / `vcc_add`） |
 | 还没有任何快照且会话也重建不出（空会话 / ctx 未暴露 projection / 无 tools） | 走失败策略——单条消息请求没有 system/tools，前缀复用直接作废 |
 | 模型全程没调 `vcc_done` | 默认：警告 + 接受当前草稿（只被 P4 校验过的补丁改过，状态安全）；`guards.requireDone: true` 时升级为失败 |
 | 空 `changes` 补丁 | 同样过 P4 上限检查（不放过已超限的草稿） |
+| 模型删到章节标题 / 转录区行号 | 拒绝并给原因（标题是结构；转录区只读、只当原料） |
 
 手动 `/compact <instructions>` 的 `customInstructions` 会拼进尾部指令（只影响前缀之后的内容，不影响缓存）。
 
@@ -92,6 +97,6 @@ assistant 正文。每次剥离写一行 `finalize` 日志（`stripped*` / `rena
 - `src/vcc.ts`：解析并加载**上游** pi-vcc（仓库内 submodule → 显式路径 → 环境变量 → npm 安装位置），
   并记录加载到的版本与路径到日志（`vcc_loaded`）。我们从不修改它。
 - `src/engine.ts`：快照、草稿、校验循环、失败策略。
-- `src/patch.ts`：P1–P4 与 diff 回执渲染（无 pi 依赖，可单测）。
+- `src/patch.ts`：`vcc_delete`（行号）/ `vcc_add`（节名）与 diff 回执渲染（无 pi 依赖，可单测）。
 - `src/pi-settings.ts`：读 pi 自己的设置（`images.blockImages`，项目 `.pi/settings.json` 覆盖全局），
   让快照与 pi 的 `convertToLlmWithBlockImages` 逐字节一致。

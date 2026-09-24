@@ -3,7 +3,7 @@
  *
  * Flow: VCC produces a mechanical draft -> the draft is appended to an exact
  * copy of the last provider request (snapshot) -> the model corrects it with
- * vcc_patch / vcc_draft / vcc_done -> the corrected draft becomes the
+ * vcc_delete / vcc_add / vcc_draft / vcc_done -> the corrected draft becomes the
  * compaction summary. No extra summarization request, no prefix change.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -12,7 +12,7 @@ import { convertToLlm } from "@earendil-works/pi-coding-agent";
 import { type Config } from "./config";
 import { createLogger, type Logger } from "./log";
 import { finalizeSummary } from "./finalize";
-import { applyChanges, effectiveTokensOf, SECTION_RE, tokensOf, type Change } from "./patch";
+import { applyAdd, applyDeletes, effectiveTokensOf, SECTION_RE, tokensOf, type Applied, type Rejected } from "./patch";
 import {
   ERR_DRAFT_READ_CAP,
   ERR_RECALL_IN_CHECK,
@@ -22,6 +22,8 @@ import {
   TOOL_DONE_OK,
   buildTailInstruction,
   draftHeader,
+  numberLines,
+  renderForModel,
 } from "./prompt";
 import { isBlockImagesEnabled } from "./pi-settings";
 import { loadVcc, type VccModule } from "./vcc";
@@ -601,15 +603,33 @@ const text = (value: string, isError = false): ToolOutcome =>
     ? { content: [{ type: "text", text: value }], details: undefined, isError: true }
     : { content: [{ type: "text", text: value }], details: undefined };
 
-export function toolPatch(params: Any): ToolOutcome {
+export function toolDelete(params: Any): ToolOutcome {
   if (!phase?.active) return text(ERR_TOOL_OUTSIDE_PHASE, true);
-  const changes = params?.changes;
-  const result = applyChanges({
+  const result = applyDeletes({
     draft: phase.draft,
-    changes: changes as Change[],
+    lines: params?.lines as number[],
     capTokens: phase.capTokens,
     charsPerToken: phase.charsPerToken,
   });
+  return patchOutcome(result);
+}
+
+export function toolAdd(params: Any): ToolOutcome {
+  if (!phase?.active) return text(ERR_TOOL_OUTSIDE_PHASE, true);
+  const result = applyAdd({
+    draft: phase.draft,
+    section: params?.section,
+    lines: params?.lines,
+    replace: params?.replace === true,
+    capTokens: phase.capTokens,
+    charsPerToken: phase.charsPerToken,
+  });
+  return patchOutcome(result);
+}
+
+/** Shared result handling: failure bookkeeping (repeat hint) and the draft swap. */
+function patchOutcome(result: Applied | Rejected): ToolOutcome {
+  if (!phase?.active) return text(ERR_TOOL_OUTSIDE_PHASE, true);
   if (!result.ok) {
     phase.guard.fails += 1;
     let message = result.error;
@@ -632,7 +652,7 @@ export function toolDraft(params: Any): ToolOutcome {
     return text(ERR_DRAFT_READ_CAP(phase.maxDraftReads), true);
   }
   phase.guard.draftReads += 1;
-  const body = section ? extractSection(phase.draft, section) : phase.draft;
+  const body = section ? extractSection(phase.draft, section) : renderForModel(phase.draft);
   // The budget is about the finalized summary (the transcript is stripped), so
   // report that number next to the raw size of what is actually shown.
   const shown = effectiveTokensOf(phase.draft, phase.charsPerToken);
@@ -653,14 +673,38 @@ function extractSection(draft: string, header: string): string {
     .map((line, index) => ({ line: line.trim(), index }))
     .filter((entry) => SECTION_RE.test(entry.line));
   const start = headers.find((entry) => entry.line === wanted);
-  if (!start) return `Section ${wanted} not found; full draft:\n\n${draft}`;
+  if (!start) return `Section ${wanted} not found; full draft:\n\n${renderForModel(draft)}`;
   const next = headers.find((entry) => entry.index > start.index);
-  return lines.slice(start.index, next ? next.index : lines.length).join("\n");
+  // numbered like the full view, so the model can delete from this excerpt too
+  const slice = lines.slice(start.index, next ? next.index : lines.length);
+  return numberLines(slice, start.index).join("\n");
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 // The check loop
 // ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * What pi keeps verbatim after the cut: the setting it used plus the concrete
+ * tail (message count and rough token size). Quoted in the instruction so the
+ * model knows how much of the session it neither has to restate nor to
+ * re-extract.
+ */
+export function keptTurnStats(ctx: Any, prep: Any): { keepRecentTokens: number; messages: number; tokens: number } {
+  const keepRecentTokens = Number(prep?.settings?.keepRecentTokens) || 0;
+  let messages = 0;
+  let tokens = 0;
+  try {
+    const branch: Any[] = ctx?.sessionManager?.getBranch?.() ?? [];
+    const at = branch.findIndex((entry) => entry?.id === prep?.firstKeptEntryId);
+    const kept = (at >= 0 ? branch.slice(at) : []).filter((entry) => entry?.type === "message");
+    messages = kept.length;
+    tokens = Math.ceil(roughChars(kept.map((entry) => entry.message)) / 4);
+  } catch {
+    /* the configured number alone is still worth stating */
+  }
+  return { keepRecentTokens, messages, tokens };
+}
 
 /**
  * The assistant message that closed the last real request — the reply the
@@ -753,10 +797,13 @@ async function runCheckLoop(args: {
   capTokens: number;
   charsPerToken: number;
   reserveTokens: number;
+  /** What pi keeps verbatim after the cut (settings value + the concrete tail). */
+  keptTurns?: { keepRecentTokens: number; messages: number; tokens: number };
   customInstructions?: string;
   log: Logger;
 }): Promise<{ summary: string; usage: Usage; rounds: number }> {
   const { ctx, model, cfg, signal, capTokens, charsPerToken, reserveTokens, customInstructions, log } = args;
+  const keptTurns = args.keptTurns ?? { keepRecentTokens: 0, messages: 0, tokens: 0 };
   const usage = emptyUsage();
   // Byte-level verification of the check request (round 1 only): the custom
   // fetch below injects the captured wire tools verbatim and captures the
@@ -770,9 +817,9 @@ async function runCheckLoop(args: {
     reserveTokens,
     modelMaxTokens: model?.maxTokens ?? 0,
     draftTokens,
+    keptTurns,
     customInstructions,
   });
-
   const continuation = snapshotContinuationAssistant(ctx);
   const messages: Any[] = [
     ...(snapshot?.messages ?? []),
@@ -926,7 +973,8 @@ async function runCheckLoop(args: {
     for (const call of calls) {
       const name = String(call?.name ?? "");
       let outcome: ToolOutcome;
-      if (name === "vcc_patch") outcome = toolPatch(call?.arguments ?? {});
+      if (name === "vcc_delete") outcome = toolDelete(call?.arguments ?? {});
+      else if (name === "vcc_add") outcome = toolAdd(call?.arguments ?? {});
       else if (name === "vcc_draft") outcome = toolDraft(call?.arguments ?? {});
       else if (name === "vcc_done") outcome = toolDone();
       else if (name === "vcc_recall") outcome = text(ERR_RECALL_IN_CHECK, true);
@@ -1095,6 +1143,7 @@ export async function onBeforeCompact(event: Any, ctx: Any, cfg: Config): Promis
       capTokens,
       charsPerToken,
       reserveTokens,
+      keptTurns: keptTurnStats(ctx, prep),
       customInstructions: typeof event?.customInstructions === "string" ? event.customInstructions : undefined,
       log,
     });
@@ -1182,7 +1231,8 @@ function safeSessionId(ctx: Any): string | undefined {
  * that drive runCheckLoop / fail with controlled inputs).
  */
 export const __internals = {
-  applyChanges,
+  applyDeletes,
+  applyAdd,
   tokensOf,
   compileDraft,
   toolsFromPayload,
@@ -1198,6 +1248,7 @@ export const __internals = {
   restoreSnapshot,
   rebuildSnapshotFromSession,
   setToolProvider,
+  keptTurnStats,
   snapshotContinuationAssistant,
   _testSetPhase: (p: Phase | null) => {
     phase = p;

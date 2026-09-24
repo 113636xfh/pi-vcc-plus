@@ -4,7 +4,7 @@
  * Registers (at session start, so the tools array is part of the stable
  * prefix):
  *   - the compaction mechanism block appended to the system prompt
- *   - vcc_patch / vcc_draft / vcc_done (only usable during the compaction check)
+ *   - vcc_delete / vcc_add / vcc_draft / vcc_done (only usable during the check)
  *   - snapshots of the last provider request (prefix source of truth)
  *   - the compaction takeover on session_before_compact
  */
@@ -12,20 +12,24 @@ import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { ensureConfigFile, loadConfig } from "./src/config";
 import {
+  DESC_VCC_ADD,
+  DESC_VCC_ADD_LINES,
+  DESC_VCC_ADD_REPLACE,
+  DESC_VCC_ADD_SECTION,
+  DESC_VCC_DELETE,
+  DESC_VCC_DELETE_LINES,
   DESC_VCC_DONE,
   DESC_VCC_DRAFT,
-  DESC_VCC_PATCH,
-  DESC_VCC_PATCH_NEW,
-  DESC_VCC_PATCH_OLD,
 } from "./src/prompt";
 import {
   onBeforeCompact,
   recordContext,
   recordPayload,
   setToolProvider,
+  toolAdd,
+  toolDelete,
   toolDone,
   toolDraft,
-  toolPatch,
 } from "./src/engine";
 import { createLogger } from "./src/log";
 import { loadVccRecallTool } from "./src/vcc";
@@ -41,19 +45,28 @@ export default async function piVccPlus(pi: ExtensionAPI): Promise<void> {
   if (!cfg.enabled) return;
 
   pi.registerTool({
-    name: "vcc_patch",
-    label: "VCC Patch",
-    description: DESC_VCC_PATCH,
+    name: "vcc_delete",
+    label: "VCC Delete",
+    description: DESC_VCC_DELETE,
     parameters: Type.Object({
-      changes: Type.Array(
-        Type.Object({
-          oldText: Type.String({ description: DESC_VCC_PATCH_OLD }),
-          newText: Type.String({ description: DESC_VCC_PATCH_NEW }),
-        }),
-      ),
+      lines: Type.Array(Type.Number(), { description: DESC_VCC_DELETE_LINES }),
     }),
     async execute(_toolCallId: string, params: unknown) {
-      return toolPatch(params);
+      return toolDelete(params);
+    },
+  });
+
+  pi.registerTool({
+    name: "vcc_add",
+    label: "VCC Add",
+    description: DESC_VCC_ADD,
+    parameters: Type.Object({
+      section: Type.String({ description: DESC_VCC_ADD_SECTION }),
+      lines: Type.Array(Type.String(), { description: DESC_VCC_ADD_LINES }),
+      replace: Type.Optional(Type.Boolean({ description: DESC_VCC_ADD_REPLACE })),
+    }),
+    async execute(_toolCallId: string, params: unknown) {
+      return toolAdd(params);
     },
   });
 

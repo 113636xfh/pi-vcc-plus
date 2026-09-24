@@ -13,7 +13,7 @@ pi 的原生压缩是一个**独立的摘要请求**：换掉 system prompt、�
 pi-vcc-plus 换了一种产出摘要的方式：
 
 1. **草稿由算法生成**——上游 [pi-vcc](https://github.com/sting8k/pi-vcc) 机械抽取：确定性、零模型调用、毫秒级；
-2. **模型只打补丁**——在当前会话尾部追加一条指令，模型用 `vcc_patch` 对草稿就地增删改（可多轮）；
+2. **模型只打补丁**——在当前会话尾部追加一条指令，模型用 `vcc_delete`（按行号删）/ `vcc_add`（按节名追加）就地修正草稿（可多轮）；
 3. **前缀一个字节不动**——检查请求 = 上一次真实请求的原文（system + tools + messages）+ 尾部指令，
    前缀逐字节相同 → 服务端 KV 缓存必然复用。
 
@@ -27,7 +27,7 @@ git submodule `third_party/pi-vcc` @ `303e89d`）：
 | | pi-vcc（上游） | pi-vcc-plus（本扩展） |
 |---|---|---|
 | 草稿生成 | 机械抽取算法（结构、预算锚、校准） | 复用上游，不复制不改写（直接读它的源码） |
-| 模型参与 | 无（纯算法） | 检查循环：`vcc_patch` / `vcc_draft` / `vcc_done` 就地修正 |
+| 模型参与 | 无（纯算法） | 检查循环：`vcc_delete` / `vcc_add` / `vcc_draft` / `vcc_done` 就地修正 |
 | 前缀稳定性 | 不处理 | 快照复用 + 字节级复核 + fail-closed |
 | 历史检索 | `vcc_recall`（读原始 JSONL） | 默认注册（可关闭） |
 
@@ -56,7 +56,9 @@ git commit -m "bump pi-vcc"
 
 1. **VCC 机械草稿**：本地运行上游 pi-vcc 生成结构化草稿（零模型调用）；
 2. **组装检查请求**：上一次 provider 请求的快照（system + tools + messages 原文）+ 尾部指令（草稿、预算、补丁规则）；
-3. **模型打补丁循环**：模型在"压缩校验阶段"用三个封闭工具修正草稿，可多轮；
+3. **模型打补丁循环**：模型在“压缩校验阶段”用封闭工具修正草稿，可多轮——`vcc_delete` 按**行号**删行
+   （草稿的章节区对模型是带行号的视图：`NNN | 行`；转录区不编号、只读），`vcc_add` 按**节名**把行追加到该节末尾
+   （`replace:true` 先清空该节，即“整体重写该节”），每次调用的回执是一段**完整 diff**（删掉的行带行号）；
 4. **定稿写入会话**：定稿前先过一道机械剥离（丢掉草稿末尾的逐轮转录、`---` 与 `vcc_recall` 提示，见下），
    再把定稿摘要返回给 pi、由 pi 写 `CompactionEntry`；保留的尾部原样进入下一个窗口。
 
@@ -115,7 +117,7 @@ git commit -m "bump pi-vcc"
 |---|---|
 | 快照缺失 | 全新会话还没发生过 provider 请求（`/reload` 后先尝试恢复持久化快照；仅全新会话需先发一条消息） |
 | tools 不可用/不一致 | 拿不到 wire tools；wire tools 含 grammar/custom、`strict: true`、`defer_loading` |
-| 补丁校验失败 | P1–P4：oldText 找不到/不唯一、超预算、连续失败超限 |
+| 补丁校验失败 | 行号越界/指向标题/指向转录区/重复删同一行；追加超出预算；连续失败超限 |
 | 模型异常 | API 错误、中止、纯文本收尾但 `requireDone`、轮次/draft 读取上限 |
 
 默认策略 `onFailure: auto`：手动 `/compact` → 抛错；自动压缩 → 取消 + 通知。
@@ -183,7 +185,7 @@ pi install "<repo-dir>"
 
 ```powershell
 bun run typecheck                            # tsc --noEmit（strict）
-bun test test/                              # P1–P4 单测 + 校验循环回归 + recall 加载
+bun test test/                              # 编辑规则单测 + 校验循环回归 + recall 加载
 bun run test/draft-smoke.ts <session.jsonl>  # 用真实会话离线生成草稿（不调模型）
 node scripts/e2e-rpc-compact-test.mjs        # RPC E2E：种子短会话 → 三轮 → /compact
 node scripts/e2e-rpc-compact-resume.mjs      # 恢复压缩后的会话 → 提问 → 第二次 /compact
@@ -199,7 +201,7 @@ node scripts/log-rounds.mjs [sessionId]      # 读会话日志，打出每轮 ca
 ## 目录结构
 
 ```
-index.ts                 pi 扩展入口（系统提示词块 + 三个工具 + 快照 + 压缩接管）
+index.ts                 pi 扩展入口（系统提示词块 + 四个工具 + 快照 + 压缩接管）
 src/
   config.ts              配置与系统提示词块（英文常量）
   prompt.ts              尾部指令 / diff 回执 / 错误文案（英文）

@@ -25,7 +25,7 @@ import {
   blockImageMessages,
   toolDraft,
 } from "../src/engine";
-import { applyChanges } from "../src/patch";
+import { applyDeletes } from "../src/patch";
 
 const {
   toolsFromPayload,
@@ -56,7 +56,7 @@ function freshPhase(draft: string) {
   };
 }
 
-const VCC_TOOL = { name: "vcc_patch", description: "", parameters: { type: "object" } };
+const VCC_TOOL = { name: "vcc_add", description: "", parameters: { type: "object" } };
 
 function snapshotWith(tools: unknown[] | undefined) {
   _testSetSnapshot({
@@ -99,7 +99,7 @@ const cfg = () => structuredClone(DEFAULTS);
 
 describe("extractSection (vcc_draft section support)", () => {
   test("extracts a section by header", () => {
-    expect(extractSection(DRAFT, "[Outstanding Context]")).toBe("[Outstanding Context]\n- step 1\n- step 2");
+    expect(extractSection(DRAFT, "[Outstanding Context]")).toBe("4 | [Outstanding Context]\n5 | - step 1\n6 | - step 2");
   });
   test("extracts the trailing section without a trailing header", () => {
     expect(extractSection(DRAFT, "Outstanding Context")).toContain("- step 2");
@@ -221,11 +221,11 @@ describe("runCheckLoop success paths", () => {
     _testSetSnapshot(null);
   });
 
-  test("vcc_patch round trip applies changes then vcc_done finalizes", async () => {
+  test("vcc_add round trip applies changes then vcc_done finalizes", async () => {
     _testSetPhase(freshPhase(DRAFT));
     snapshotWith([VCC_TOOL]);
     const responses = [
-      assistant([{ type: "toolCall", id: "c1", name: "vcc_patch", arguments: { changes: [{ oldText: "- step 1", newText: "- step 1 (done)" }] } }], "stop"),
+      assistant([{ type: "toolCall", id: "c1", name: "vcc_add", arguments: { section: "Outstanding Context", lines: ["- step 1 (done)"] } }], "stop"),
       assistant([doneCall], "stop"),
     ];
     let i = 0;
@@ -360,12 +360,12 @@ describe("blockImageMessages (mirrors pi's convertToLlmWithBlockImages)", () => 
 
 describe("empty patch list still enforces P4", () => {
   test("no-op patch rejects when the draft is already over the cap", () => {
-    const result = applyChanges({ draft: DRAFT, changes: [], capTokens: 5, charsPerToken: 4 });
+    const result = applyDeletes({ draft: DRAFT, lines: [], capTokens: 5, charsPerToken: 4 });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toContain("over the cap");
   });
   test("no-op patch accepts when under the cap", () => {
-    const result = applyChanges({ draft: DRAFT, changes: [], capTokens: 10_000, charsPerToken: 4 });
+    const result = applyDeletes({ draft: DRAFT, lines: [], capTokens: 10_000, charsPerToken: 4 });
     expect(result.ok).toBe(true);
   });
 });

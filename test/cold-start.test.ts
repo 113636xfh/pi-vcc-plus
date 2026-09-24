@@ -17,7 +17,8 @@ const { rebuildSnapshotFromSession, restoreSnapshot, setToolProvider, persistSna
 
 const scratch = mkdtempSync(join(tmpdir(), "vcc-plus-cold-"));
 const tools = [
-  { name: "vcc_patch", description: "patch the draft", parameters: { type: "object" } },
+  { name: "vcc_delete", description: "delete lines", parameters: { type: "object" } },
+  { name: "vcc_add", description: "add lines", parameters: { type: "object" } },
   { name: "read", description: "read a file", parameters: { type: "object" } },
 ];
 
@@ -53,7 +54,7 @@ test("rebuilds a snapshot from the session when none exists", () => {
   const s = _getSnapshot()!;
   expect(s.messages.length).toBe(2);
   expect(s.systemPrompt).toBe("SYSTEM PROMPT");
-  expect(s.tools?.length).toBe(2);
+  expect(s.tools?.length).toBe(3);
   expect(s.toolsSource).toBe("rebuilt from the session (cold start)");
   expect(s.toolsRoundTrip).toBe("unknown");
   expect(s.prefixTokens).toBeGreaterThan(0);
