@@ -523,6 +523,65 @@ describe("runCheckLoop: check-request byte verification (integration)", () => {
     _testSetSnapshot(null);
   });
 
+  test("baseline read before the loop: sentinel-style overwrite of last-request.json mid-call is not compared to itself", async () => {
+    const cwd = join(scratch, "overwrite");
+    mkdirSync(cwd, { recursive: true });
+    const u2 = { role: "user", content: "u2" };
+    // The last real request: 2 messages.
+    setup(cwd, [u1, u2], WIRE_TOOLS);
+    _testSetPhase(freshPhase());
+    _testSetSnapshot({
+      messages: [u1, u2],
+      systemPrompt: "sys",
+      tools: RECONSTRUCTED_TOOLS.map((t) => ({ ...t, parameters: t.input_schema })),
+      wireTools: WIRE_TOOLS,
+      toolsSource: "test",
+      toolsRoundTrip: "ok",
+      prefixTokens: 10,
+      at: 0,
+    });
+
+    const { log, entries } = captureLog();
+    fetchCalls.length = 0;
+    await runCheckLoop({
+      ctx: ctxWithCwd(cwd, async (_context, options) => {
+        const body = JSON.stringify({ model: "m", system: "S", tools: RECONSTRUCTED_TOOLS, messages: [u1, u2, { role: "user", content: "TAIL" }] });
+        await (options.fetch as typeof globalThis.fetch)("https://x.test/v1/messages", { method: "POST", body });
+        // Simulate the sentinel's fetch-level capture: the check request
+        // itself overwrites last-request.json before the response returns.
+        const sent = bodyOf(0);
+        writeFileSync(
+          join(cwd, ".pi", "prefix-sentinel", "last-request.json"),
+          JSON.stringify({
+            index: 2,
+            ts: 9999,
+            modelId: "m",
+            pretty: JSON.stringify(sent),
+            messages: sent.messages,
+          }),
+          "utf8",
+        );
+        return doneResponse();
+      }),
+      model: { maxTokens: 4096 },
+      cfg: structuredClone(DEFAULTS),
+      signal: undefined,
+      capTokens: 10_000,
+      charsPerToken: 4,
+      reserveTokens: 16384,
+      log,
+    });
+
+    const checkPrefix = entries.find(([n]) => n === "checkPrefix")?.[1];
+    // The verdict must be against the ORIGINAL 2-message baseline (read
+    // before the loop), not the overwritten 3-message check body itself.
+    expect(checkPrefix!.identical).toBe(true);
+    expect(checkPrefix!.baselineSource).toBe("sentinel");
+    expect(checkPrefix!.messages).toEqual({ baseline: 2, check: 3 });
+    _testSetPhase(null);
+    _testSetSnapshot(null);
+  });
+
   test("stale self-baseline (ts < snapshot.at) is ignored, not used", async () => {
     const cwd = join(scratch, "stale-self");
     mkdirSync(join(cwd, ".pi", "vcc-plus"), { recursive: true });

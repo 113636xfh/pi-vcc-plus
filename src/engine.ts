@@ -882,6 +882,12 @@ async function runCheckLoop(args: {
   // outgoing body, which is then compared against the previous real
   // request's wire body (sentinel baseline, else our own capture).
   const checkCapture: { url?: string; bodyText?: string } = {};
+  // Read the wire baseline BEFORE the first check request goes out: the
+  // prefix-sentinel captures every provider request at the fetch level —
+  // including this check request — and overwrites last-request.json mid-loop.
+  // A baseline read after round 1 would compare the check body to itself
+  // (a vacuous "identical: true").
+  const wireBaseline = readWireBaseline(ctx?.cwd, snapshot?.at);
   const draftTokens = effectiveTokensOf(phase!.draft, charsPerToken);
   const instruction = buildTailInstruction({
     draft: phase!.draft,
@@ -1025,7 +1031,7 @@ async function runCheckLoop(args: {
     // this branch ALWAYS logs a checkPrefix line on round 1.
     if (phase!.guard.rounds === 1) {
       if (checkCapture.bodyText) {
-        const baseline = readWireBaseline(ctx?.cwd, snapshot?.at);
+        const baseline = wireBaseline;
         if (baseline) {
           try {
             const verification = verifyCheckPrefix(
