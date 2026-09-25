@@ -140,7 +140,7 @@ const SPECS = {
 		ink: () => FLOW_INK("01-flow", {
 			title: "压缩接管全流程", b1t: "VCC 机械草稿", b1s: "本地抽取 · 零模型调用",
 			b2t: "组装检查请求", b2s: "前缀复用 + 尾部指令", b3t: "模型打补丁循环",
-			b3s: "vcc_patch · vcc_done", b4t: "定稿写入会话", b4s: "摘要 + 尾部原样保留",
+			b3s: "vcc_delete / vcc_add · vcc_done", b4t: "定稿写入会话", b4s: "摘要 + 尾部原样保留",
 			loop: "直到 vcc_done 或护栏触发，再多一轮",
 		}),
 	},
@@ -150,7 +150,7 @@ const SPECS = {
 		ink: () => FLOW_INK("01-flow-en", {
 			title: "The compaction takeover flow", b1t: "VCC draft", b1s: "local, zero model calls",
 			b2t: "check request", b2s: "prefix reused + tail instruction", b3t: "model patch loop",
-			b3s: "vcc_patch · vcc_done", b4t: "write the session", b4s: "summary + verbatim tail",
+			b3s: "vcc_delete / vcc_add · vcc_done", b4t: "write the session", b4s: "summary + verbatim tail",
 			loop: "one more round until vcc_done or a guard trips",
 		}),
 	},

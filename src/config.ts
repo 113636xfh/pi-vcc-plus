@@ -96,9 +96,9 @@ This extension takes over context compaction. The flow is:
    "compaction draft" and appends it to the end of the conversation. The draft is not a user
    message: do not comment on it, restate it, or reply to it.
 2. The "compaction check phase" then begins: correct the draft with vcc_delete (drop lines by
-   regex) and vcc_add (append lines to a named section), use vcc_draft when you need to see the
-   current full draft, and call vcc_done when you are finished.
-3. These three tools are only usable during the compaction check phase; calling them at any
+   their numbers) and vcc_add (append lines to a named section), use vcc_draft when you need to
+   see the current full draft, and call vcc_done when you are finished.
+3. These four tools are only usable during the compaction check phase; calling them at any
    other time is rejected.
    Separately, vcc_recall (shipped with pi-vcc) stays available in normal turns whenever you
    need to look up earlier parts of this session; it is rejected during the check phase.
@@ -149,12 +149,16 @@ export function loadConfig(): Config {
   const base = { ...DEFAULTS, draftBudget: { ...DEFAULTS.draftBudget }, guards: { ...DEFAULTS.guards } };
   try {
     const raw = readFileSync(configPath(), "utf8");
-    const parsed = JSON.parse(raw) as Partial<Config>;
+    const parsed: unknown = JSON.parse(raw);
+    // A hand-edited file may be valid JSON that is not an object (null, a
+    // bare string, an array): spreading it would corrupt the defaults.
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return base;
+    const partial = parsed as Partial<Config>;
     return {
       ...base,
-      ...parsed,
-      draftBudget: { ...base.draftBudget, ...(parsed.draftBudget ?? {}) },
-      guards: { ...base.guards, ...(parsed.guards ?? {}) },
+      ...partial,
+      draftBudget: { ...base.draftBudget, ...(partial.draftBudget ?? {}) },
+      guards: { ...base.guards, ...(partial.guards ?? {}) },
     };
   } catch {
     return base;

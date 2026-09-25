@@ -6,7 +6,7 @@
  *    content copied from the main session file.
  * 2. Sends it as 3 user prompts (short model acks keep the transcript realistic).
  * 3. Fires {"type":"compact"} and waits for the full vcc-plus flow
- *    (draft -> check loop -> vcc_patch/vcc_done -> summary).
+ *    (draft -> check loop -> vcc_delete / vcc_add -> vcc_done -> summary).
  *
  * Usage: node scripts/e2e-rpc-compact-test.mjs [modelRef]
  * Output: JSON lines for every RPC record + a final result line.

@@ -134,15 +134,6 @@ function prefixed(prefix: string, text: string): string[] {
   return lines.map((line, index) => (index === 0 ? `${prefix}${line}` : `    ${line}`));
 }
 
-export const ERR_NOT_FOUND = (firstLine: string): string =>
-  `Could not find this text in the draft: ${firstLine}\noldText must match the draft exactly, including whitespace and newlines.`;
-export const ERR_DUPLICATE = (firstLine: string, count: number): string =>
-  `Found ${count} occurrences of this text in the draft: ${firstLine}\nInclude more context to make it unique.`;
-export const ERR_EMPTY = "oldText must not be empty.";
-export const ERR_SECTION = (line: string): string =>
-  `Section header (${line.trim()}) must not be deleted or rewritten.`;
-export const ERR_OVERLAP = (a: number, b: number): string =>
-  `Changes ${a} and ${b} in this call overlap; merge them into one change.`;
 export const ERR_OVER_CAP = (after: number, cap: number): string =>
   `After applying, the summary is ${after} tokens, over the cap of ${cap} tokens. Delete low-value entries and retry.`;
 
@@ -154,8 +145,6 @@ export const ERR_LINE_TRANSCRIPT = (number: number): string =>
 export const ERR_LINE_HEADER = (number: number, line: string): string =>
   `Line ${number} is a section header (${line}). Headers are structural: delete the section's bullets, or use vcc_add with "replace":true.`;
 export const ERR_SECTION_REQUIRED = (op: string): string => `${op} needs a "section" name (e.g. "Results").`;
-export const ERR_SECTION_UNKNOWN = (name: string, available: string[]): string =>
-  `No section named \"${name}\" in the draft. Sections here: ${available.join(", ") || "(none)"}.`;
 export const ERR_LINES_EMPTY = 'append needs non-empty "lines".';
 export const ERR_TARGET_TWICE = (line: string, order: number): string =>
   `Patch ${order} touches a line another patch already touched: ${line.slice(0, 80)}`;
@@ -167,7 +156,7 @@ export const ERR_RECALL_IN_CHECK =
 export const ERR_DRAFT_READ_CAP = (max: number): string =>
   `vcc_draft has already been called ${max} times; finish based on the diff receipts and call vcc_done.`;
 export const ERR_REPEAT_HINT =
-  "The same patch failed twice; narrow the pattern (or widen it) and check the sections listed in the error.";
+  "The same call failed twice in a row; line numbers shift after every successful edit — call vcc_draft for the current numbers, then retry.";
 export const TOOL_DONE_OK = "Finalized.";
 /**
  * The draft body handed to the model is the raw draft (sections + the

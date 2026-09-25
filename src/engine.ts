@@ -1281,7 +1281,11 @@ export async function onBeforeCompact(event: Any, ctx: Any, cfg: Config): Promis
       },
     };
   } catch (error) {
-    const overflow = (error as Any)?.overflow as { tokens: number | null; limit: number | null } | undefined;
+    // An overflow that the registry rejects (instead of resolving as a
+    // stopReason=error message) reaches here without a marker: parse the
+    // message the same way runCheckLoop does, so trim/draft still apply.
+    const overflow = ((error as Any)?.overflow ??
+      parseOverflowError(String(error))) as { tokens: number | null; limit: number | null } | null;
     log("abort", { why: "check loop failed", error: String(error), overflow: overflow ?? undefined });
     if (overflow && cfg.onContextOverflow !== "fail") {
       // Unblock the session: the context is over the provider's window, so no
