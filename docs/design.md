@@ -18,7 +18,7 @@
 | tools 只从 `before_provider_request` 的 payload 取 | 事件 ctx 不暴露 `getAllTools` / `getSystemPromptOptions`，registry 顺序 ≠ 线上顺序；payload 是上一次请求自己的 wire tools，唯一逐字节等价来源。校验请求经**自定义 fetch** 发出：出站 body 的 `tools` 被替换为捕获到的**原始 wire tools**（构造性字节一致，pi-ai 的重建永远不上 wire）。`toolsRoundTripStatus` 保留为三保险：wire tools 含 grammar/custom、`strict: true`、`defer_loading` 或未知形状时检查 fail-closed |
 | 拼上“上一次请求关尾的那条 assistant 回复”（`snapshotContinuationAssistant`） | 服务端 slot 里存的是“上一次请求的 prompt + 它生成的回复”。检查请求缺了这条回复，token 流就在快照结尾处与 slot 序列分叉——实测 FastLLM prefix cache 直接给 0 命中、全量重 prefill（~204K token / 10 分钟）。补上它，两者关系与正常轮次之间完全一致（会话里已有该条目，序列化走同一条 pi-ai 通路）；若快照里已有同内容 assistant（生成被中断等），不重复拼 |
 | 请求级参数也沿用上一次请求 | `chat_template_kwargs` 参与**服务端 chat 模板渲染**：agent 轮次 `enable_thinking: true`，`complete()` 发出的检查请求默认 `false`，同一段历史渲染出的 token 就不同（实测 2.9K 的 prompt 差 36 token）→ 前缀再逐字节相同也命不中；另外部分服务端（实测 FastLLM）把 `max_tokens` 也算进缓存键。自定义 fetch 在替换 tools 之外，把捕获到的请求级参数（除 `model`/`messages`/`tools`）写回出站 body |
-| 检查用"打补丁"而不是"重写摘要" | 模型无法破坏 VCC 的结构；失败可定位到行；`oldText` 唯一匹配的语义与原生 edit 一致，模型最熟练 |
+| 检查用"打补丁"而不是"重写摘要" | 模型无法破坏 VCC 的结构；失败可定位到行号；`vcc_delete` 只给行号、`vcc_add` 只给节名，都是廉价操作，模型不需要复述大段原文 |
 | 只用 `vcc_delete` / `vcc_add` / `vcc_draft` / `vcc_done` | 校验阶段给模型一个封闭的动作空间；`vcc_draft` 仅在 diff 不足以判断时使用 |
 | 上限用 `min(0.8 × reserveTokens, model.maxTokens)` | 与 pi 原生摘要完全相同的预算公式；写进提示词，并由 P4 校验（同一个取值来源） |
 | 护栏只用计数（轮次/失败次数/draft 读取次数） | 慢模型单次调用几十秒很正常，用时间判断会误杀 |
@@ -49,9 +49,6 @@ VCC 的 brief 强于文件/命令/最近对话，最容易丢约束、决策理�
 | P4 | 应用后总长 ≤ 上限（按**剥离后**的正文计） | 提示超限并重做 |
 
 护栏：轮次 ≤ 8、连续失败 ≤ 4、`vcc_draft` ≤ 3、同一签名连续失败 2 次给提示；
-用户中断立即停止；`callTimeoutMs > 0` 时才启用单轮超时（默认 0）。
-
-护栏：轮次 ≤ 8、连续失败 ≤ 4、`vcc_draft` ≤ 3、同一 `oldText` 连续失败 2 次给提示；
 用户中断立即停止；`callTimeoutMs > 0` 时才启用单轮超时（默认 0）。
 
 fail-closed 的边界（全部在 `src/engine.ts`）：

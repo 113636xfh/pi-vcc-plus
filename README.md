@@ -96,8 +96,8 @@ git commit -m "bump pi-vcc"
 所以定稿前做一次机械剥离（`src/finalize.ts`，**不依赖模型配合**）：
 
 - 丢掉所有转录块、`---` 分隔行、`vcc_recall` 提示与 `...(N earlier lines omitted)` 标记；
-  提示词因此**不再要求模型逐行删除转录区**（那是 7K 字符的 `oldText` 白烧输出 token，还容易 P1 匹配失败），
-  只说"转录区自动剥离、只当原料"；P4 上限也改成按**剥离后**的正文计（否则转录会把草稿顶过上限）；
+  提示词因此**不再要求模型逐行删除转录区**（那是 7K 字符的原文白烧输出 token，还容易因行号越界/指错而失败），
+  只说"转录区自动剥离、只当原料"；预算上限也改成按**剥离后**的正文计（否则转录会把草稿顶过上限）；
 - 章节名归一到固定 8 个并按固定顺序输出：`[Session Goal]`、`[Files And Changes]`、`[Commits]`、
   `[Key Decisions]`、`[Environment]`、`[Results]`、`[Outstanding Context]`、`[User Preferences]`；
   别名（`[Outstanding]`）改名，自造标题（`[Root Cause: …]`）按关键词并入最合适的章节（内容不丢）；
@@ -130,7 +130,8 @@ git commit -m "bump pi-vcc"
 npm install        # lockfile 已提交；bun install 亦可（测试用 bun 跑）
 
 # 1) 安装扩展本身（本地路径不会被复制，改代码后 /reload 即可生效）
-pi install "<repo-dir>"
+git clone https://github.com/113636xfh/pi-vcc-plus.git
+pi install ./pi-vcc-plus
 
 # 2) 让 pi 能加载 VCC：三条路任选其一（见下）
 ```
@@ -202,7 +203,7 @@ node scripts/e2e-rpc-compact-resume.mjs      # 恢复压缩后的会话 → 提�
 node scripts/log-rounds.mjs [sessionId]      # 读会话日志，打出每轮 cacheRead / prefixSuspect 验收表
 ```
 
-> `bun run typecheck` 需要 devDependencies（`typescript`、`@earendil-works/pi-coding-agent@0.85.1` 等）：
+> `bun run typecheck` 需要 devDependencies（`typescript`、`@earendil-works/pi-coding-agent@0.87.0` 等）：
 > `npm install` 或 `bun install` 装一次即可。
 > 仓库路径含 `&`，Windows 下 `.bin` shim 会解析失败——直接
 > `node node_modules/typescript/lib/tsc.js -p tsconfig.json`。

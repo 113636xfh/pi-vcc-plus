@@ -4,7 +4,7 @@
 VCC 侧用它的 `compileRanked`（生产预算）本地跑，原生侧直接用 session 里记录的摘要，
 再用同一套事实抽取做形状无关的覆盖率比对。**全程零模型调用。**
 
-样本：`~/.pi/agent/sessions/<some-project>/2026-09-13T07-25-48-212Z_01a099a8-*.jsonl`
+样本：`~/.pi/agent/sessions/<some-project>/<session-id>.jsonl`
 
 | 压缩点 | tokensBefore | span 消息 | 原生摘要 | VCC 草稿 | 改文件覆盖 | bash 命令覆盖 | 失败命令覆盖 |
 |---|---|---|---|---|---|---|---|

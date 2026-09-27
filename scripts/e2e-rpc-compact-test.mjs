@@ -14,9 +14,16 @@
 import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync, appendFileSync, existsSync } from "node:fs";
 
-const CWD = "<e2e-cwd>";
-const MAIN_SESSION =
-  "<USER>/.pi/agent/sessions/<repo-dir>/<session>.jsonl";
+// usage: node scripts/e2e-rpc-compact-test.mjs [modelRef] [cwd] [mainSession]
+//   cwd         : isolated project directory (default ./tmp-vcc-e2e)
+//   mainSession : a real session JSONL to seed 75 KB of content from
+//                 (or set $VCC_E2E_SEED_SESSION; required)
+const CWD = process.argv[3] ?? "./tmp-vcc-e2e";
+const MAIN_SESSION = process.argv[4] ?? process.env.VCC_E2E_SEED_SESSION;
+if (!MAIN_SESSION || !existsSync(MAIN_SESSION)) {
+  console.error("no seed session — pass it as argv[4] or set VCC_E2E_SEED_SESSION to a JSONL path.");
+  process.exit(2);
+}
 const TARGET_CHARS = 75_000;
 const MODEL = process.argv[2] ?? "fastllm/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp";
 const EVENTS_LOG = `${CWD}/rpc-events.log`;

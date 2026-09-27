@@ -3,10 +3,15 @@
 import { spawn } from "node:child_process";
 import { appendFileSync } from "node:fs";
 
-const CWD = "<e2e-cwd>";
-const SESSION =
-  process.argv[2] ??
-  "<USER>/.pi/agent/sessions/--D--vcc-rpc-test--/<session>.jsonl";
+// usage: node scripts/e2e-rpc-compact-resume.mjs [sessionPath] [modelRef]
+//   sessionPath : the session produced by e2e-rpc-compact-test (argv[2]
+//                 or $VCC_E2E_RESUME_SESSION)
+const CWD = process.argv[3] ?? "./tmp-vcc-e2e";
+const SESSION = process.argv[2] ?? process.env.VCC_E2E_RESUME_SESSION;
+if (!SESSION) {
+  console.error("missing session path — pass it as argv[2] or set VCC_E2E_RESUME_SESSION.");
+  process.exit(2);
+}
 const MODEL = process.env.PI_PROVIDER ? `${process.env.PI_PROVIDER}/${process.env.PI_MODEL}` : null;
 if (!MODEL) throw new Error("set PI_PROVIDER/PI_MODEL");
 

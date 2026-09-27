@@ -144,10 +144,11 @@ cooperation required**):
 
 - drop every transcript block, `---` separator line, `vcc_recall` note and
   `...(N earlier lines omitted)` marker; the prompt therefore no longer asks
-  the model to delete the transcript line by line (7 KB of `oldText` output
-  spent for nothing, and P1 exact-match failures on quoted prose) — it only
+  the model to delete the transcript line by line (7 KB of raw text output
+  spent for nothing, and failures whenever a quoted line matched more than
+  once or not at all) — it only
   says the transcript is stripped automatically and is source material; the
-  P4 cap is measured on the finalized text too, so a transcript cannot push
+  budget cap is measured on the finalized text too, so a transcript cannot push
   a draft over the budget;
 - normalize the sections to the fixed set of eight, in a fixed order:
   `[Session Goal]`, `[Files And Changes]`, `[Commits]`, `[Key Decisions]`,
@@ -193,7 +194,8 @@ npm install        # lockfile committed; bun install works too (tests run under 
 
 # 1) Install the extension itself (local paths are not copied; /reload picks
 #    up code changes)
-pi install "<repo-dir>"
+git clone https://github.com/113636xfh/pi-vcc-plus.git
+pi install ./pi-vcc-plus
 
 # 2) Let pi load VCC: pick one of three routes (below)
 ```
@@ -290,7 +292,7 @@ node scripts/log-rounds.mjs [sessionId]      # read a session log: per-round cac
 ```
 
 > `bun run typecheck` needs devDependencies (`typescript`,
-> `@earendil-works/pi-coding-agent@0.85.1`, ...): `npm install` or
+> `@earendil-works/pi-coding-agent@0.87.0`, ...): `npm install` or
 > `bun install` once.
 > The repo path contains `&`, which breaks `.bin` shims on Windows — call
 > `node node_modules/typescript/lib/tsc.js -p tsconfig.json` directly.
