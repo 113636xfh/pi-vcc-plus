@@ -122,7 +122,7 @@ describe("runCheckLoop fail-closed on non-successful responses", () => {
   test.each([
     ["error", assistant([], "error", "rate limited")],
     ["aborted", assistant([], "aborted")],
-    ["truncated length", assistant([doneCall], "length")],
+    ["truncated length (no parsed calls)", assistant([{ type: "text", text: "cut off mid-sentence" }], "length")],
     ["deferred", assistant([], "deferred")],
     ["errorMessage without stopReason", assistant([], "stop", "boom")],
   ])("fail closed for %s", async (_label, response) => {
@@ -300,6 +300,62 @@ describe("runCheckLoop success paths", () => {
     expect(calls).toBe(2);
     expect(result.rounds).toBe(2);
     expect(result.summary).toContain("- step 1 (done)");
+    _testSetPhase(null);
+    _testSetSnapshot(null);
+  });
+
+  test("a truncated response that parsed tool calls is applied instead of failing closed", async () => {
+    _testSetPhase(freshPhase(DRAFT));
+    snapshotWith([VCC_TOOL]);
+    const ctx: any = {
+      hasUI: false,
+      ui: { notify: () => {} },
+      modelRegistry: {
+        complete: async () =>
+          assistant(
+            [{ type: "toolCall", id: "c1", name: "vcc_add", arguments: { section: "Outstanding Context", lines: ["- step 1 (done)"] } }],
+            "length", // hit the completion cap, but the batch parsed
+          ),
+      },
+    };
+    const logs: Array<{ event: string }> = [];
+    const result = await runCheckLoop({
+      ctx,
+      model: { maxTokens: 4096 },
+      cfg: cfg(),
+      signal: undefined,
+      capTokens: 10_000,
+      charsPerToken: 4,
+      reserveTokens: 16384,
+      log: ((event: string) => logs.push({ event })) as any,
+    });
+    expect(result.rounds).toBe(1);
+    expect(result.summary).toContain("- step 1 (done)");
+    expect(logs.some((l) => l.event === "round_truncated")).toBe(true);
+    _testSetPhase(null);
+    _testSetSnapshot(null);
+  });
+
+  test("a truncated response with no parsed tool calls still fails closed", async () => {
+    _testSetPhase(freshPhase(DRAFT));
+    snapshotWith([VCC_TOOL]);
+    const ctx: any = {
+      hasUI: false,
+      ui: { notify: () => {} },
+      modelRegistry: { complete: async () => assistant([{ type: "text", text: "thinking out loud..." }], "length") },
+    };
+    await expect(
+      runCheckLoop({
+        ctx,
+        model: { maxTokens: 4096 },
+        cfg: cfg(),
+        signal: undefined,
+        capTokens: 10_000,
+        charsPerToken: 4,
+        reserveTokens: 16384,
+        log: silentLog(),
+      }),
+    ).rejects.toThrow(/stopReason=length/);
     _testSetPhase(null);
     _testSetSnapshot(null);
   });

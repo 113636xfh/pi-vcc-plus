@@ -36,9 +36,8 @@ VCC 侧用它的 `compileRanked`（生产预算）本地跑，原生侧直接用
 | `max_tokens` 100 → 26214 | cached=0 | 该服务端把 `max_tokens` 也算进前缀缓存键 |
 | `store` false/不传 | 无差异 | 与缓存键无关 |
 
-生产会话里的同一现象（`scripts/log-rounds.mjs` 输出）：`checkPrefix identical=true` 但
-round 1 `cacheRead=0 / prefixSuspect=true`，随后 round 2 命中 219,136 —— 说明"同一轮里的延续"能命中，
-"跨到真实请求"不能。
+生产会话里的同一现象（`scripts/log-rounds.mjs` 输出）：`checkPrefix identical=true`，但同一轮的检查请求
+`cacheRead=0 / prefixSuspect=true` —— 逐字节相同不等于命中，**请求级参数分叉也会 miss**（下文两条修复）。
 
 两条修复（`7c78e6a`）：
 
@@ -65,3 +64,76 @@ round 1 `cacheRead=0 / prefixSuspect=true`，随后 round 2 命中 219,136 —�
 代价对照（同一次 E2E，vLLM、26K 上下文）：对齐开启时检查轮继承了 `enable_thinking: true`，
 round 1 输出 4441 token / 2m05s；对齐关闭时检查轮不思考（FastLLM 时代实测 25–45s/轮）。
 所以 `alignCheckParams` 按后端取舍：模板/缓存键与参数相关的后端留 true，纯 token 键的后端可关。
+
+## 压缩耗时实测（当前设计：单轮补充）
+
+设备：e5 的 llama.cpp（`-c 350208 --parallel 2 --kv-unified`、q8_0 KV、MTP draft n=3）上的
+Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp。方法：`scripts/bench-compact.mjs` 用同一会话种子跑同一段对话，
+原生侧 `--no-extensions`、VCC 侧 `-e <扩展>`；`scripts/bench-analyze.mjs` 读扩展日志的逐轮 usage
+与服务端逐请求 `prompt eval time`。**每组 3 个样本，跑前确认服务端空闲**——同一提示词三次的输出
+token 会差 2.4 倍（32,205 / 14,308 / 13,202），单样本结论一律不成立。
+
+### 小上下文（种子 ~26K，3 样本中位）
+
+| | 压缩耗时 | 输出 token | 摘要字符 |
+|---|---|---|---|
+| 原生（独立摘要请求） | 171.2 s | 9,096 | 9,016 |
+| VCC（单轮补充） | 213.9 s | 13,427 | 5,716 |
+
+小上下文下 VCC 不占优：它的收益来自"省掉压缩起始那次全量 prefill"，而 26K 的前缀本来就便宜。
+
+### 大上下文（~200K）
+
+| 阶段 | 原生 | VCC |
+|---|---|---|
+| 压缩起始 prefill | 113,686 token（冷，实测 248.5 s） | **8,051 token**（续上一次请求 → `cacheRead` 命中 213,772） |
+| 压缩完成后加载新上下文 | 102,011 token（冷） | 104,972 token（冷，打平） |
+| **prefill 合计** | 215,697 token | **113,023 token（省 102,674）** |
+| 生成 | 3,423 token | 9,891–34,804 token（中位 ~14K） |
+
+放大后的真实 prefill 速率（同一日志 923 次请求按规模取中位速率）：
+
+| 请求规模 | 中位速率 | 按此速率换算一次 200K 全量 prefill |
+|---|---|---|
+| 10K–40K | 508 tok/s | 394 s |
+| 80K–120K | 458 tok/s | 437 s |
+| **120K–160K** | **265 tok/s** | **753 s** |
+| **160K–220K** | **322 tok/s** | **622 s** |
+
+大上下文一次全量 prefill 是 **620–750 秒**，不是几十秒。于是盈亏平衡可以写成：
+
+> 多花的生成 token < 省下的 prefill token × (生成速率 / prefill 速率)
+
+按 prefill 290 tok/s、生成 60 tok/s 计：省下的 102,674 token ≈ 354 s，能换约 **21,000** 个生成 token。
+VCC 的 check 多数样本落在 10–21K（占优），个别样本到 32K/35K（转亏）——所以"单轮结束"是这笔交易成立的前提。
+
+### 为什么 check 的思考量比原生摘要大（精确拆分）
+
+用服务端 `/tokenize` 量摘要文本自身，再与 API 报的 output 相减：
+
+| 运行 | 摘要 token | 输出 token | 纯思考 |
+|---|---|---|---|
+| 原生 @200K | 2,748 | 3,423 | 675 |
+| VCC @200K | 4,410 | 20,839 | 16,429 |
+
+四条结构原因，都在"模型看到什么、以什么身份看"：
+
+1. **身份**：原生用专用摘要系统提示词（`You are a context summarization assistant … ONLY output the
+   structured summary`）；VCC 为前缀命中必须沿用 agent 的 system prompt（编码助手，约 9.8K 字符）。
+2. **工具**：原生摘要请求不带 tools；VCC 的 check 必须带上 agent 的 9 个工具定义（字节一致要求）。
+3. **材料**：原生把对话重排成紧凑文本并把工具结果截到 2,000 字符（`serializeConversation`）：
+   小种子下 prompt 17,225 token vs VCC 30,322，200K 下 113,686 vs 216,219。
+4. **任务形态**：原生是"按模板写摘要"（纯生成）；VCC 是"对着草稿增删改 + 覆盖清单"（差分/校验型任务）。
+
+这也解释了为什么尾部指令不再堆规则：字数越多的约束会让模型把预算花在"如何满足约束"上，而缓存命中
+又要求 `enable_thinking` 与上一轮保持一致（翻转它前缀就分叉），思考无法从参数层关掉。
+
+### 由实测定下的三条设计约束
+
+1. **单轮即结束**（`guards.maxRounds = 1`）：带编辑的那一次响应就是全部补充内容，应用后阶段立即结束
+   —— 多轮只会反复吃同一份草稿的 diff 回执，并让每一轮都再付一次全上下文的 cache read。
+2. **空轮纠偏一次**（`guards.emptyRetries = 1`）：如果那一次响应完全没有工具调用，阶段会把它自己的回复
+   加一句纠偏后再问一次；否则会把未改动的机械草稿当成摘要落盘。
+3. **截断不闭锁**：响应撞到 completion 上限时，凡是**已解析出**的工具调用照常应用并结束这一轮
+   （`round_truncated`）；只有"截断且没有任何可用调用"才是失败。单轮形态下一次响应可能很长，
+   这条因此不可省。

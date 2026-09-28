@@ -13,7 +13,7 @@ pi 的原生压缩是一个**独立的摘要请求**：换掉 system prompt、�
 pi-vcc-plus 换了一种产出摘要的方式：
 
 1. **草稿由算法生成**——上游 [pi-vcc](https://github.com/sting8k/pi-vcc) 机械抽取：确定性、零模型调用、毫秒级；
-2. **模型只打补丁**——在当前会话尾部追加一条指令，模型用 `vcc_delete`（按行号删）/ `vcc_add`（按节名追加）就地修正草稿（可多轮）；
+2. **模型只做一次补充**——在当前会话尾部追加一条指令，模型用 `vcc_delete`（按行号删）/ `vcc_add`（按节名追加）补一次；这一次响应就是全部补充内容，应用后阶段立即结束；
 3. **前缀一个字节不动**——检查请求 = 上一次真实请求的原文（system + tools + messages）+ 尾部指令，
    前缀逐字节相同 → 服务端 KV 缓存必然复用。
 
@@ -27,7 +27,7 @@ git submodule `third_party/pi-vcc` @ `303e89d`）：
 | | pi-vcc（上游） | pi-vcc-plus（本扩展） |
 |---|---|---|
 | 草稿生成 | 机械抽取算法（结构、预算锚、校准） | 复用上游，不复制不改写（直接读它的源码） |
-| 模型参与 | 无（纯算法） | 检查循环：`vcc_delete` / `vcc_add` / `vcc_draft` / `vcc_done` 就地修正 |
+| 模型参与 | 无（纯算法） | 一次补充轮：`vcc_delete` / `vcc_add`（`vcc_draft` 按需，`vcc_done` 可选） |
 | 前缀稳定性 | 不处理 | 快照复用 + 字节级复核 + fail-closed |
 | 历史检索 | `vcc_recall`（读原始 JSONL） | 默认注册（可关闭） |
 
@@ -56,9 +56,11 @@ git commit -m "bump pi-vcc"
 
 1. **VCC 机械草稿**：本地运行上游 pi-vcc 生成结构化草稿（零模型调用）；
 2. **组装检查请求**：上一次 provider 请求的快照（system + tools + messages 原文）+ 尾部指令（草稿、预算、补丁规则）；
-3. **模型打补丁循环**：模型在“压缩校验阶段”用封闭工具修正草稿，可多轮——`vcc_delete` 按**行号**删行
+3. **一次补充轮**：模型在“压缩校验阶段”用封闭工具补一次——`vcc_delete` 按**行号**删行
    （草稿的章节区对模型是带行号的视图：`NNN | 行`；转录区不编号、只读），`vcc_add` 按**节名**把行追加到该节末尾
-   （`replace:true` 先清空该节，即“整体重写该节”），每次调用的回执是一段**完整 diff**（删掉的行带行号）；
+   （`replace:true` 先清空该节，即“整体重写该节”），每次调用的回执是一段**完整 diff**（删掉的行带行号）。
+   这一次响应会被原样应用并结束该阶段（`vcc_done` 可选）；若这一轮完全没有工具调用，追加一句纠偏后再问一次
+   （`guards.emptyRetries`）；若响应撞上 completion 上限，已解析出的调用照常应用（`round_truncated`）；
 4. **定稿写入会话**：定稿前先过一道机械剥离（丢掉草稿末尾的逐轮转录、`---` 与 `vcc_recall` 提示，见下），
    再把定稿摘要返回给 pi、由 pi 写 `CompactionEntry`；保留的尾部原样进入下一个窗口。
 
@@ -167,7 +169,9 @@ pi install ./pi-vcc-plus
 
 - `checkModel: null` = 检查请求跟随会话当前模型；
 - `guards` 全部是**计数**：慢模型不会被时间掐断（`callTimeoutMs` 默认 0 = 不限）；
-  `requireDone: true` 时模型必须显式 `vcc_done`（纯文本收尾升级为失败，默认只警告）；
+  `maxRounds: 1` = 单轮补充（带编辑的那一次响应即全部内容），设 >1 回到"多轮补丁直到 `vcc_done`"的形态；
+  `emptyRetries: 1` = 某一轮完全没有工具调用时再问一次（否则会把未改动的机械草稿当成摘要落盘）；
+  `requireDone: true` 时模型必须显式 `vcc_done`（否则纯文本收尾升级为失败）；
 - `onFailure`：`auto`（手动抛错 / 自动 cancel+通知）、`cancel`、`throw`、`draft`（显式回退未校验草稿）；
 - `fallbackToNative: false` = 失败时不静默退回 pi 原生摘要；
 - `upstreamRecallTool: true` = 注册上游 pi-vcc 自带的只读 `vcc_recall`（校验阶段内被拒绝）；
@@ -191,6 +195,27 @@ pi install ./pi-vcc-plus
 - 配置只在扩展加载时读一次；改 `config.json` 需 `/reload`（中途改会改变系统块、破坏前缀不变量）；
 - 草稿的 chars/token 校准沿用上游 `before-compact.ts` 的锚（span 字符 + 上次摘要字符 ÷ `tokensBefore`）：
   这是上游算法的行为（对估算偏保守），我们刻意保持一致、不单方分叉。
+
+## 实测（压缩耗时）
+
+同一段对话、同一模型（e5 本地 Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp，llama.cpp `-c 350208 --parallel 2 --kv-unified`），
+每组 3 个样本取中位——同一提示词三次的输出 token 会差 2.4 倍（32,205 / 14,308 / 13,202），单样本不作数。
+
+| 上下文 | 原生（独立摘要请求） | pi-vcc-plus |
+|---|---|---|
+| ~26K | 171.2 s / 输出 9,096 token | 213.9 s / 输出 13,427 token |
+
+小上下文 VCC 不占优；它省掉的是**压缩起始那次全量 prefill**，而这次省只在上下文变大时才值钱：
+
+| ~200K 阶段 | 原生 | pi-vcc-plus |
+|---|---|---|
+| 压缩起始 prefill | 113,686 token（冷） | **8,051 token**（续上一次请求，`cacheRead` 命中 213,772） |
+| 压缩完成后加载新上下文 | 102,011 token（冷） | 104,972 token（冷，打平） |
+| **prefill 合计** | 215,697 token | **113,023 token（省 102,674）** |
+
+这台机器上 120K–220K 规模的 prefill 中位速率只有 **265–322 token/s**，即**一次 200K 全量 prefill ≈ 620–750 秒**。
+按 prefill 290 / 生成 60 token/s 折算，省下的 prefill 约等于 21,000 个生成 token 的预算——所以"压缩阶段单轮结束"
+是这笔交易成立的前提。完整数据、速率分布与思考量的精确拆分见 [`docs/vcc-vs-native-notes.md`](docs/vcc-vs-native-notes.md)。
 
 ## 测试
 

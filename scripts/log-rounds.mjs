@@ -7,10 +7,14 @@
  *   node scripts/log-rounds.mjs <sessionId>   # substring match on the file name
  *   node scripts/log-rounds.mjs --all         # every session log, oldest first
  *
- * The one line that matters: `round.cacheRead` must be close to
+ * The check phase is one supplement pass (guards.maxRounds = 1), so a healthy
+ * compaction shows exactly one `round` line followed by `single_round_end`.
+ * The line that matters: `round.cacheRead` must be close to
  * `expectedPrefixTokens` (a full prefill shows cacheRead 0 / prefixSuspect
  * true). Hits are block-aligned server-side, so a remainder below one block
  * (vLLM 16 tokens, FastLLM 2048 tokens) is normal.
+ * `empty_round_retry` means that round carried no edits at all and was re-asked
+ * (guards.emptyRetries) instead of finalizing the untouched draft.
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
@@ -89,10 +93,23 @@ for (const path of pickFiles()) {
       case "round": {
         const extra = e.prefixSuspect ? "  <-- PREFIX SUSPECT" : "";
         console.log(
-          `${fmtTime(e.ts)}  round ${String(e.round).padEnd(10)} cacheRead=${e.cacheRead} expectedPrefix=${e.expectedPrefixTokens}  ${verdict(e.cacheRead, e.expectedPrefixTokens)}${extra}`,
+          `${fmtTime(e.ts)}  round ${String(e.round).padEnd(10)} in=${e.input} cacheRead=${e.cacheRead} out=${e.output} expectedPrefix=${e.expectedPrefixTokens}  ${verdict(e.cacheRead, e.expectedPrefixTokens)}${extra}`,
         );
         break;
       }
+      case "single_round_end":
+        console.log(
+          `${fmtTime(e.ts)}  single_round_end rounds=${e.rounds}${e.requireDone ? " (requireDone)" : ""}`,
+        );
+        break;
+      case "empty_round_retry":
+        console.log(
+          `${fmtTime(e.ts)}  empty_round_retry round=${e.round} was empty, re-asked (attempt ${e.attempt})`,
+        );
+        break;
+      case "loop_end_without_done":
+        console.log(`${fmtTime(e.ts)}  loop_end_without_done rounds=${e.rounds} (patch loop, no vcc_done)`);
+        break;
       case "summary_final":
         console.log(
           `${fmtTime(e.ts)}  summary_final    ${e.rounds} rounds, ${e.tokens} tokens` +

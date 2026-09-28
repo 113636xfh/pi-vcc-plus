@@ -9,7 +9,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { convertToLlm } from "@earendil-works/pi-coding-agent";
-import { type Config } from "./config";
+import { configPath, type Config } from "./config";
 import { createLogger, type Logger } from "./log";
 import { finalizeSummary } from "./finalize";
 import { applyAdd, applyDeletes, effectiveTokensOf, SECTION_RE, tokensOf, type Applied, type Rejected } from "./patch";
@@ -980,13 +980,21 @@ async function runCheckLoop(args: {
     // stopReason "error" | "aborted" plus errorMessage — so these must be
     // checked here; otherwise a failed round would look like "no tool calls"
     // and the uncorrected draft would be finalized silently.
-    // "length" = output truncated mid tool-call batch (partial arguments are
-    // unsafe to apply); "deferred" = no content available to inspect.
+    // "length" = the output hit the completion cap. A batch that was cut off
+    // mid-argument is unsafe, so a truncated response with no parsed tool calls
+    // is still a failure; a truncated response that *did* parse tool calls is
+    // applied and ends the pass instead, because the phase is a single
+    // supplement pass and refusing it would drop everything the model had
+    // already produced (observed: the model writes its additions in one batch
+    // and can hit the inherited max_tokens).
+    // "deferred" = no content available to inspect.
+    const parsedCalls = (response?.content ?? []).filter((part: Any) => part?.type === "toolCall");
+    const truncatedButUsable = response?.stopReason === "length" && parsedCalls.length > 0;
     if (
       signal?.aborted ||
       response?.stopReason === "error" ||
       response?.stopReason === "aborted" ||
-      response?.stopReason === "length" ||
+      (response?.stopReason === "length" && !truncatedButUsable) ||
       response?.stopReason === "deferred" ||
       response?.errorMessage
     ) {
@@ -1098,7 +1106,16 @@ async function runCheckLoop(args: {
       toolsCount: snapshot?.tools?.length ?? 0,
     });
 
-    const calls = (response?.content ?? []).filter((part: Any) => part?.type === "toolCall");
+    const calls = parsedCalls;
+    if (truncatedButUsable) {
+      log("round_truncated", { round: phase!.guard.rounds, calls: calls.length });
+      if (ctx?.hasUI) {
+        ctx.ui.notify(
+          `vcc-plus: the check response hit the output cap; applying the ${calls.length} edit call(s) that arrived`,
+          "warning",
+        );
+      }
+    }
     if (calls.length === 0) {
       // The phase ends after the response that carries the additions. A response
       // with no tool calls at all leaves the mechanical draft untouched, which is
@@ -1194,7 +1211,16 @@ export async function onBeforeCompact(event: Any, ctx: Any, cfg: Config): Promis
   const prep = event?.preparation;
   const log = createLogger(safeSessionId(ctx), cfg.debugLog);
   const reason = String(event?.reason ?? "auto");
-  log("compact_start", { reason, willRetry: event?.willRetry ?? false, tokensBefore: prep?.tokensBefore, firstKeptEntryId: prep?.firstKeptEntryId });
+  log("compact_start", {
+    reason,
+    willRetry: event?.willRetry ?? false,
+    tokensBefore: prep?.tokensBefore,
+    firstKeptEntryId: prep?.firstKeptEntryId,
+    // Effective guards: makes a stale config.json (it is read once, at extension
+    // load) visible in the log instead of only in the behaviour.
+    guards: { ...cfg.guards },
+    configPath: configPath(),
+  });
 
   if (!prep) {
     log("abort", { why: "no preparation" });

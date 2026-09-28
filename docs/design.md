@@ -19,7 +19,7 @@
 | 拼上“上一次请求关尾的那条 assistant 回复”（`snapshotContinuationAssistant`） | 服务端 slot 里存的是“上一次请求的 prompt + 它生成的回复”。检查请求缺了这条回复，token 流就在快照结尾处与 slot 序列分叉——实测 FastLLM prefix cache 直接给 0 命中、全量重 prefill（~204K token / 10 分钟）。补上它，两者关系与正常轮次之间完全一致（会话里已有该条目，序列化走同一条 pi-ai 通路）；若快照里已有同内容 assistant（生成被中断等），不重复拼 |
 | 请求级参数也沿用上一次请求 | `chat_template_kwargs` 参与**服务端 chat 模板渲染**：agent 轮次 `enable_thinking: true`，`complete()` 发出的检查请求默认 `false`，同一段历史渲染出的 token 就不同（实测 2.9K 的 prompt 差 36 token）→ 前缀再逐字节相同也命不中；另外部分服务端（实测 FastLLM）把 `max_tokens` 也算进缓存键。自定义 fetch 在替换 tools 之外，把捕获到的请求级参数（除 `model`/`messages`/`tools`）写回出站 body |
 | 检查用"打补丁"而不是"重写摘要" | 模型无法破坏 VCC 的结构；失败可定位到行号；`vcc_delete` 只给行号、`vcc_add` 只给节名，都是廉价操作，模型不需要复述大段原文 |
-| 只用 `vcc_delete` / `vcc_add` / `vcc_draft` / `vcc_done` | 校验阶段给模型一个封闭的动作空间；`vcc_draft` 仅在 diff 不足以判断时使用 |
+| 只用 `vcc_delete` / `vcc_add` / `vcc_draft` / `vcc_done` | 校验阶段给模型一个封闭的动作空间；`vcc_draft` 仅在回执不足以判断时使用；一次响应 = 一次补充轮，应用后结束 |
 | 上限用 `min(0.8 × reserveTokens, model.maxTokens)` | 与 pi 原生摘要完全相同的预算公式；写进提示词，并由 P4 校验（同一个取值来源） |
 | 护栏只用计数（轮次/失败次数/draft 读取次数） | 慢模型单次调用几十秒很正常，用时间判断会误杀 |
 | 校验请求的字节级复核（B 面，自验证） | 校验请求走 `ModelRegistry.complete` → `runtime.complete`，**不经过** Agent 的 `onPayload`，哨兵看不到它；所以 pi-vcc-plus 自己的 fetch 拦截：tools 原样替换 + 首次出站 body 与上一次真实请求的 wire body 前缀比较（基线要求 `ts ≥ 快照时刻`、取较新者、平手优先哨兵，旧残留不会误报），结果写 `checkPrefix` 日志、完整 body 写 `.pi/prefix-sentinel/check-request.json`；第 1 轮必有一行 `checkPrefix`，验不到也是可见状态（`identical: null` + `reason`） |
@@ -61,7 +61,9 @@ fail-closed 的边界（全部在 `src/engine.ts`）：
 | `recordContext` 构建快照失败 | 快照置 null，下个 compaction 走失败策略——旧快照会静默破坏前缀不变量 |
 | 没有内存快照（`/reload` / 新进程 / 新项目） | 先读同会话的持久化快照（`restoreSnapshot`，同会话+完整+非 mismatch）；没读到则 `rebuildSnapshotFromSession` 从会话自身重建（messages 取 `buildSessionProjection()` → `convertToLlm` → blockImages，system 取 `ctx.getSystemPrompt()`，tools 取 `pi.getAllTools()` 的活跃项），记 `snapshot_rebuilt`；tools 拿不到或会话为空才抛错（没有 tools 模型无法调 `vcc_delete` / `vcc_add`） |
 | 还没有任何快照且会话也重建不出（空会话 / ctx 未暴露 projection / 无 tools） | 走失败策略——单条消息请求没有 system/tools，前缀复用直接作废 |
-| 模型全程没调 `vcc_done` | 默认：警告 + 接受当前草稿（只被 P4 校验过的补丁改过，状态安全）；`guards.requireDone: true` 时升级为失败 |
+| 这一轮完全没有编辑（只有文本/思考） | `guards.emptyRetries: 1` 时追加一句纠偏再问一次；预算用尽则接受未改动的草稿（状态安全，但摘要等于机械草稿） |
+| 响应撞上 completion 上限（`stopReason=length`） | 已解析出的工具调用照常应用并结束这一轮（`round_truncated`）；一个可用调用都没有才算失败 |
+| 模型全程没调 `vcc_done` | 单轮形态下这是预期的结束状态（不警告）；`guards.maxRounds > 1` 的多轮形态下警告 + 接受当前草稿；`guards.requireDone: true` 时升级为失败 |
 | 空补丁列表 | 同样过预算检查（不放过已超限的草稿） |
 | 检查请求超出 provider 上下文窗口（`onContextOverflow: "trim"`） | 用 provider 的真实数字反推 chars/token（pi 的 `chars/4` 估算在中文内容上偏乐观 ~1.8×，实测 178,397 vs 322,385），丢掉最旧的快照消息使请求装得下，记 `check_trimmed`，重试一次；重试仍超窗 → `draftFallback`（记 `overflow_fallback`，UI 警告）；`"draft"` 直接走草稿，`"fail"` 不做特殊处置 |
 | 模型删到章节标题 / 转录区行号 | 拒绝并给原因（标题是结构；转录区只读、只当原料） |
