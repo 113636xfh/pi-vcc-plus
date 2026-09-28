@@ -11,69 +11,92 @@ const base = {
 };
 
 describe("buildTailInstruction", () => {
-  test("frames the model as a summarization assistant that must not continue the work", () => {
+  // The shape mirrors pi's own summarization system prompt: a role statement plus a
+  // strict output restriction, and the phase is one supplement pass that ends when the
+  // model stops. Measured on a local 27B (docs/vcc-vs-native-notes.md): the check phase
+  // stays within one round, which removes the tail of extra rounds the loop produced.
+  test("states the role as a single supplement pass that ends with the response", () => {
     const text = buildTailInstruction({ ...base });
-    expect(text).toContain("You are a context summarization assistant, not a coding assistant");
-    expect(text).toContain("Do NOT continue the conversation");
-    expect(text).toContain("Do NOT do any of the work it describes");
-    expect(text).toContain("write user-facing text");
+    expect(text).toContain("You are the supplement pass of this session's compaction");
+    expect(text).toContain("your one job is to add what it is missing");
+    expect(text).toContain("the phase ends right after this response");
+    expect(text).toContain("no second");
+    expect(text).toContain("pass, so send everything in one batch");
+    expect(text).toContain("do not answer questions");
+    expect(text).toContain("in the conversation");
   });
 
-  test("borrows the native framing: a checkpoint summary for the next LLM", () => {
+  test("keeps the prompt short", () => {
     const text = buildTailInstruction({ ...base });
-    expect(text).toContain("structured context checkpoint summary that another LLM will use to continue the");
+    expect(text.length).toBeLessThan(2500);
   });
 
-  test("quotes pi's keepRecentTokens setting and forbids restating the kept turns", () => {
-    const text = buildTailInstruction({ ...base });
-    expect(text).toContain("pi keeps the recent turns verbatim");
-    expect(text).toContain("keepRecentTokens = 20000 tokens");
-    expect(text).toContain("last 52 messages (~21345 tokens)");
-    expect(text).toContain("will be in the\nnext window");
-    expect(text).toContain("Do NOT restate their content, state or outcomes");
-    expect(text).toContain("Do not re-extract what only they show either");
-  });
-
-  test("falls back to wording without numbers when the settings are unavailable", () => {
-    const text = buildTailInstruction({ ...base, keptTurns: { keepRecentTokens: 0, messages: 0, tokens: 0 } });
-    expect(text).toContain("pi keeps the recent turns at the end of this conversation verbatim");
-    expect(text).not.toContain("keepRecentTokens = 0");
-  });
-
-  test("pins the format structure: fixed section headers, bullets, no invented sections", () => {
-    const text = buildTailInstruction({ ...base });
-    expect(text).toContain("[Format]");
-    expect(text).toContain(
-      "[Session Goal], [Files And Changes], [Commits], [Key Decisions], [Environment],\n  [Results], [Outstanding Context], [User Preferences].",
-    );
-    expect(text).toContain("The transcript is READ-ONLY, unnumbered and WILL NOT BE KEPT");
-    expect(text).toContain("must be added to a section, or it\n  is lost.");
-    expect(text).toContain("Do not rename, merge or reorder them, and never invent another header");
-    expect(text).toContain("one fact per line, no prose paragraphs");
-    expect(text).toContain("Preserve exact file paths, commands, PIDs, ports, and error messages");
-    expect(text).toContain("anything not inside one\n  of them is lost");
-  });
-
-  test("keeps the coverage checklist for what the mechanical draft misses", () => {
-    const text = buildTailInstruction({ ...base });
-    expect(text).toContain("[Coverage]");
-    expect(text).toContain("Constraints and safety rules stated by the user");
-    expect(text).toContain("Key decisions and their rationale");
-    expect(text).toContain("Exact environment details");
-    expect(text).toContain("Unfinished items and concrete next steps");
-    expect(text).toContain("Measured results and failure facts");
-    expect(text).toContain("do not invent");
-  });
-
-  test("wraps the draft in <draft> tags", () => {
+  test("wraps the numbered draft in <draft> tags", () => {
     const text = buildTailInstruction({ ...base });
     expect(text).toContain("<draft>\n1 | [Session Goal]\n2 | - test\n</draft>");
   });
 
-  test("budget line shows cap and current draft tokens", () => {
+  test("pins the section list and the bullet format", () => {
     const text = buildTailInstruction({ ...base });
-    expect(text).toContain("<= 1000 tokens");
-    expect(text).toContain("currently ~10 tokens");
+    expect(text).toContain("[Format]");
+    expect(text).toContain(
+      "[Session Goal], [Files And Changes], [Commits], [Key Decisions], [Environment],",
+    );
+    expect(text).toContain("[Results], [Outstanding Context], [User Preferences].");
+    expect(text).toContain("A section with nothing to say may be omitted");
+    expect(text).toContain("one fact per line, no prose paragraphs");
+    expect(text).toContain("Copy exact paths,");
+    expect(text).toContain("IDs and numbers as they are");
+  });
+
+  test("says the transcript is dropped and facts must move into a section", () => {
+    const text = buildTailInstruction({ ...base });
+    expect(text).toContain("read-only");
+    expect(text).toContain("it is dropped afterwards");
+    expect(text).toContain("must move into a section first");
+  });
+
+  test("names the fact kinds the mechanical draft most often misses", () => {
+    const text = buildTailInstruction({ ...base });
+    expect(text).toContain("[Task]");
+    expect(text).toContain("user constraints, decisions with their");
+    expect(text).toContain("environment details");
+    expect(text).toContain("unfinished work with its next step");
+    expect(text).toContain("measured results");
+  });
+
+  test("quotes the budget without pushing the summary shorter", () => {
+    const text = buildTailInstruction({ ...base });
+    expect(text).toContain("Stay under 1000 tokens");
+    expect(text).toContain("the draft is ~10");
+    // no "shorter is better" pressure: that measurably dropped exact paths
+    expect(text).not.toContain("beats a long one");
+  });
+
+  test("quotes pi's keepRecentTokens and forbids restating the kept turns", () => {
+    const text = buildTailInstruction({ ...base });
+    expect(text).toContain("pi keeps the last 52 messages (~21345 tokens;");
+    expect(text).toContain("keepRecentTokens = 20000");
+    expect(text).toContain("not restate them");
+    expect(text).toContain("next step: X");
+  });
+
+  test("falls back to wording without numbers when the settings are unavailable", () => {
+    const text = buildTailInstruction({ ...base, keptTurns: { keepRecentTokens: 0, messages: 0, tokens: 0 } });
+    expect(text).toContain("pi keeps the recent turns at the end of this conversation verbatim right after this");
+    expect(text).not.toContain("keepRecentTokens = 0");
+  });
+
+  test("documents the two edit tools, the closed tool set, and that vcc_done is optional", () => {
+    const text = buildTailInstruction({ ...base });
+    expect(text).toContain("[Edits]");
+    expect(text).toContain("only vcc_delete / vcc_add / vcc_draft / vcc_done work");
+    expect(text).toContain("any other tool\nis rejected");
+    expect(text).toContain("vcc_delete removes numbered lines");
+    expect(text).toContain("vcc_add appends lines to a named section");
+    expect(text).toContain('"replace":true rewrites that section first');
+    expect(text).toContain("You do not need vcc_done");
+    expect(text).toContain("is applied as-is");
   });
 
   test("custom instructions appear only when provided", () => {
@@ -81,29 +104,5 @@ describe("buildTailInstruction", () => {
     expect(buildTailInstruction({ ...base, customInstructions: "focus on errors" })).toContain(
       "[User instructions for this summary] focus on errors",
     );
-  });
-
-  test("documents the two edit tools: numbered delete and section append", () => {
-    const text = buildTailInstruction({ ...base });
-    expect(text).toContain("[How to edit] Two tools");
-    expect(text).toContain('vcc_delete: {"lines":[12,13,27]} removes those lines, addressed by the numbers');
-    expect(text).toContain(
-      "A number in the transcript, a section\n  header, an unknown number or a repeat is rejected with the reason",
-    );
-    expect(text).toContain("The receipt lists the\n  removed lines with their numbers");
-    expect(text).toContain('vcc_add: {"section":"Results","lines":["- round 1 cacheRead=37632 (hit)"]} appends');
-    expect(text).toContain("no locating text, no anchor line to repeat");
-    expect(text).toContain("Its receipt shows both sides: removed lines with the numbers they had, added lines with");
-    expect(text).toContain("the numbers they just got");
-    expect(text).toContain("Add \"replace\":true to drop the section's current bullets");
-    // the draft the model sees is numbered, and the transcript marker separates the regions
-    expect(text).toContain("1 | [Session Goal]");
-    expect(text).toContain("The draft's sections region is numbered (NNN | text)");
-  });
-
-  test("pins the closed tool set for the check phase", () => {
-    const text = buildTailInstruction({ ...base });
-    expect(text).toContain("Only vcc_delete / vcc_add / vcc_draft / vcc_done may be called");
-    expect(text).toContain("will be rejected during this phase");
   });
 });

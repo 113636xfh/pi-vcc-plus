@@ -24,88 +24,42 @@ export function buildTailInstruction(args: {
   const scope = args.keptTurns;
   const scopeLine =
     scope && scope.keepRecentTokens > 0
-      ? `[Scope] pi keeps the recent turns verbatim. This session's compaction settings are\n` +
-        `keepRecentTokens = ${scope.keepRecentTokens} tokens, which for this session means the\n` +
-        `last ${scope.messages} messages (~${scope.tokens} tokens) at the end of the\n` +
-        `conversation. Those turns - their text, tool calls and tool results - will be in the\n` +
-        `next window right after this summary, so the model that reads the summary sees them\n` +
-        `directly:`
-      : `[Scope] pi keeps the recent turns at the end of this conversation verbatim: their\n` +
-        `text, tool calls and tool results will be in the next window right after the summary,\n` +
-        `so the model that reads the summary sees them directly:`;
-  return `You are a context summarization assistant, not a coding assistant. Your only job in
-this phase is to finalize the compaction draft into the summary of this session.
-Do NOT continue the conversation. Do NOT do any of the work it describes, answer its
-questions, or write user-facing text. Your only outputs are vcc_delete / vcc_add edits and vcc_done.
-
-Create a structured context checkpoint summary that another LLM will use to continue the
-work. The block below is a mechanical extraction of the part of the session that is about
-to be replaced; your patches turn it into the summary that starts the next context window.
+      ? `- pi keeps the last ${scope.messages} messages (~${scope.tokens} tokens; this session's\n` +
+        `  keepRecentTokens = ${scope.keepRecentTokens}) verbatim right after this summary: do\n` +
+        `  not restate them, a one-line forward pointer ("next step: X") is enough.`
+      : `- pi keeps the recent turns at the end of this conversation verbatim right after this\n` +
+        `  summary: do not restate them, a one-line forward pointer ("next step: X") is enough.`;
+  return `You are the supplement pass of this session's compaction. The draft below is already
+the summary's skeleton, and your one job is to add what it is missing. Everything you send
+is applied to the draft, and the phase ends right after this response: there is no second
+pass, so send everything in one batch. Do not continue the work, do not answer questions
+in the conversation, and do not plan anything.
 
 <draft>
 ${renderForModel(draft)}
 </draft>
 
-[Format] The draft's sections region is numbered (NNN | text) for editing; below the marker
-sits a mechanical transcript of the turns being replaced (lines like [user], [assistant],
-[tool], * tool "..." (#123), more "---" separators and a trailing "Use vcc_recall ..."
-note).
-- The transcript is READ-ONLY, unnumbered and WILL NOT BE KEPT: it is dropped mechanically
-  after you finish. It is raw material only: mine it for facts and put them in the right
-  section. Anything worth keeping that exists only there must be added to a section, or it
-  is lost.
-- Emit exactly these sections, in this order and with these names:
+[Format] The numbered lines are the summary's sections. Below them sits a read-only
+transcript of the turns being replaced: it is dropped afterwards, so anything worth keeping
+that only exists there must move into a section first. Emit exactly these sections, in this
+order:
   [Session Goal], [Files And Changes], [Commits], [Key Decisions], [Environment],
   [Results], [Outstanding Context], [User Preferences].
-  Do not rename, merge or reorder them, and never invent another header. A section with
-  nothing to say may be omitted; the others keep their relative order.
-- Every section is a concise bullet list: one fact per line, no prose paragraphs, no
-  transcript lines, no "(#123)" markers.
-- Preserve exact file paths, commands, PIDs, ports, and error messages.
-- Delete stale or low-value lines freely; keep only what the next session needs.
+A section with nothing to say may be omitted; the others keep their relative order. Every
+section is a bullet list: one fact per line, no prose paragraphs. Copy exact paths,
+commands, IDs and numbers as they are.
 
+[Task] Add what the draft misses and matters: user constraints, decisions with their
+reasons, exact environment details, unfinished work with its next step, measured results
+and failures. Stay under ${capTokens} tokens (the draft is ~${draftTokens}).
 ${scopeLine}
-- Do NOT restate their content, state or outcomes; a one-line forward pointer
-  ("next step: X") is enough.
-- Do not re-extract what only they show either: it is already there. Spend the summary on
-  what the kept turns no longer carry, i.e. everything before them.
 
-[Coverage] The draft is good at files, commands, and the recent conversation. Check this
-conversation for what it most often misses and add it with vcc_add:
-- Constraints and safety rules stated by the user ("do not", "never", "must")
-- Key decisions and their rationale (why this, why not that)
-- Exact environment details (ports, PIDs, paths, environment variables, versions)
-- Unfinished items and concrete next steps (with commands and parameters)
-- Measured results and failure facts (numbers, error text, failed commands)
-Use only what you actually saw in this conversation - do not invent.
-
-[Budget] The final summary must be <= ${capTokens} tokens
-         (= min(0.8 x reserveTokens=${reserveTokens}, model.maxTokens=${modelMaxTokens}));
-         the draft is currently ~${draftTokens} tokens.
-${customInstructions ? `\n[User instructions for this summary] ${customInstructions}\n` : ""}
-[How to edit] Two tools; call vcc_done when finished.
-- vcc_delete: {"lines":[12,13,27]} removes those lines, addressed by the numbers in the
-  numbered draft. Send the whole batch in one call. A number in the transcript, a section
-  header, an unknown number or a repeat is rejected with the reason. The receipt lists the
-  removed lines with their numbers; the numbers of later lines then shift, so call
-  vcc_draft before reusing old numbers.
-- vcc_add: {"section":"Results","lines":["- round 1 cacheRead=37632 (hit)"]} appends
-  lines to the END of that section - no locating text, no anchor line to repeat. The name
-  resolves like the headers above ([Outstanding] counts as [Outstanding Context]) and a
-  missing section is created. Add "replace":true to drop the section's current bullets
-  first: that one call rewrites the section (typical: refresh [Session Goal] or [Results]).
-  Its receipt shows both sides: removed lines with the numbers they had, added lines with
-  the numbers they just got (so you can delete one of them later by that number).
-- In addition: any fact that only exists in the transcript and matters must be moved into a
-  section with vcc_add, because the transcript is dropped at finalize.
-- Only vcc_delete / vcc_add / vcc_draft / vcc_done may be called; any other tool (including
-  edit, read, bash, vcc_recall) will be rejected during this phase.
-- Use vcc_draft only when a diff receipt is not enough to judge the draft (usually not
-  needed).
-- A mechanical pass then drops the whole transcript, the "---" lines and the vcc_recall
-  note, and folds unknown headers into the eight sections above: anything not inside one
-  of them is lost.`;
+[Edits] In this phase only vcc_delete / vcc_add / vcc_draft / vcc_done work; any other tool
+is rejected. vcc_delete removes numbered lines; vcc_add appends lines to a named section
+("replace":true rewrites that section first). You do not need vcc_done: what you send here
+is applied as-is.${customInstructions ? `\n\n[User instructions for this summary] ${customInstructions}` : ""}`
 }
+
 
 /** vcc_delete / vcc_add 成功回执：完整 diff，不截断。 */
 export function buildDiffReceipt(args: {
@@ -148,6 +102,16 @@ export const ERR_SECTION_REQUIRED = (op: string): string => `${op} needs a "sect
 export const ERR_LINES_EMPTY = 'append needs non-empty "lines".';
 export const ERR_TARGET_TWICE = (line: string, order: number): string =>
   `Patch ${order} touches a line another patch already touched: ${line.slice(0, 80)}`;
+/**
+ * Appended after a check round whose response carried no edits at all. The phase is
+ * designed to end after the response that carries the additions, so an edit-less
+ * response is re-asked (guards.emptyRetries times) instead of finalizing the
+ * untouched mechanical draft.
+ */
+export const EMPTY_ROUND_NUDGE =
+  "Your reply carried no tool calls, so the summary is still the mechanical draft. " +
+  "Send the vcc_delete / vcc_add calls for what it is still missing - tool calls only.";
+
 export const ERR_TOOL_NOT_ALLOWED =
   "Only vcc_delete / vcc_add / vcc_draft / vcc_done are allowed during the compaction check; other tools (including edit, read, bash) will be rejected.";
 export const ERR_TOOL_OUTSIDE_PHASE = "This tool is only usable during the compaction check phase.";

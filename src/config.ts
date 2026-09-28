@@ -3,8 +3,19 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 export interface Guards {
-  /** One "round" = one model request inside the check phase. */
+  /**
+   * One "round" = one model request inside the check phase.
+   * 1 (default) = the designed shape: the model reads the draft and sends every
+   * addition in that single response, which is applied and ends the phase.
+   * >1 restores the older patch-until-`vcc_done` loop.
+   */
   maxRounds: number;
+  /**
+   * Extra attempts allowed when a round's response carries no edits at all.
+   * 1 (default) = the edit-less round is re-asked once, because ending the phase
+   * there would finalize the untouched mechanical draft. 0 disables the retry.
+   */
+  emptyRetries: number;
   maxConsecutiveFails: number;
   maxDraftReads: number;
   /**
@@ -95,15 +106,17 @@ This extension takes over context compaction. The flow is:
 1. When compaction is needed, a script first extracts this conversation into a mechanical
    "compaction draft" and appends it to the end of the conversation. The draft is not a user
    message: do not comment on it, restate it, or reply to it.
-2. The "compaction check phase" then begins: correct the draft with vcc_delete (drop lines by
-   their numbers) and vcc_add (append lines to a named section), use vcc_draft when you need to
-   see the current full draft, and call vcc_done when you are finished.
-3. These four tools are only usable during the compaction check phase; calling them at any
-   other time is rejected.
+2. The "check phase" that follows is a single supplement pass: read the draft, then send
+   everything it is missing with vcc_delete (drop lines by their numbers) and vcc_add (append
+   lines to a named section). Use vcc_draft only when the receipts are not enough to judge the
+   draft.
+3. What you send in that one response is applied as-is and ends the phase, so send everything
+   in one batch; vcc_done is optional. Those four tools are only usable during the check
+   phase; calling them at any other time is rejected.
    Separately, vcc_recall (shipped with pi-vcc) stays available in normal turns whenever you
    need to look up earlier parts of this session; it is rejected during the check phase.
-4. Your changes are applied to the draft. When compaction completes, the new context is this
-   finalized summary plus the last few turns kept verbatim, and the current task continues.
+4. The finalized summary plus the last few turns kept verbatim become the new context, and the
+   current task continues.
 5. During the check phase, output tool calls only: do not continue the conversation and do not
    write user-facing text.
 </pi-vcc-plus>`;
@@ -114,7 +127,8 @@ export const DEFAULTS: Config = {
   checkModel: null,
   draftBudget: { floorTokens: 1100, ceilingTokens: 2000, tokensPerBlock: 15 },
   guards: {
-    maxRounds: 8,
+    maxRounds: 1,
+    emptyRetries: 1,
     maxConsecutiveFails: 4,
     maxDraftReads: 3,
     callTimeoutMs: 0,

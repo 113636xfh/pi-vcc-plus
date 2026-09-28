@@ -51,7 +51,7 @@ function freshPhase(draft: string) {
     capTokens: 10_000,
     charsPerToken: 4,
     maxDraftReads: 3,
-    guard: { rounds: 0, fails: 0, draftReads: 0, done: false },
+    guard: { rounds: 0, fails: 0, draftReads: 0, done: false, edits: 0, emptyRetries: 0 },
     failedOldTexts: new Map<string, number>(),
   };
 }
@@ -222,6 +222,8 @@ describe("runCheckLoop success paths", () => {
   });
 
   test("vcc_add round trip applies changes then vcc_done finalizes", async () => {
+    const c = cfg();
+    c.guards.maxRounds = 8; // loop shape: patch until vcc_done
     _testSetPhase(freshPhase(DRAFT));
     snapshotWith([VCC_TOOL]);
     const responses = [
@@ -233,7 +235,7 @@ describe("runCheckLoop success paths", () => {
     const result = await runCheckLoop({
       ctx,
       model: { maxTokens: 4096 },
-      cfg: cfg(),
+      cfg: c,
       signal: undefined,
       capTokens: 10_000,
       charsPerToken: 4,
@@ -242,6 +244,92 @@ describe("runCheckLoop success paths", () => {
     });
     expect(result.summary).toContain("- step 1 (done)");
     expect(result.rounds).toBe(2);
+    _testSetPhase(null);
+    _testSetSnapshot(null);
+  });
+
+  test("single-round shape (default): one response is applied and ends the phase", async () => {
+    _testSetPhase(freshPhase(DRAFT));
+    snapshotWith([VCC_TOOL]);
+    const responses = [
+      assistant(
+        [{ type: "toolCall", id: "c1", name: "vcc_add", arguments: { section: "Outstanding Context", lines: ["- step 1 (done)", "- step 2 (done)"] } }],
+        "stop",
+      ),
+      assistant([doneCall], "stop"), // must never be consumed
+    ];
+    let calls = 0;
+    const ctx: any = { hasUI: false, ui: { notify: () => {} }, modelRegistry: { complete: async () => responses[calls++] } };
+    const result = await runCheckLoop({
+      ctx,
+      model: { maxTokens: 4096 },
+      cfg: cfg(), // defaults: guards.maxRounds = 1
+      signal: undefined,
+      capTokens: 10_000,
+      charsPerToken: 4,
+      reserveTokens: 16384,
+      log: silentLog(),
+    });
+    expect(calls).toBe(1); // exactly one model call
+    expect(result.rounds).toBe(1);
+    expect(result.summary).toContain("- step 1 (done)");
+    expect(result.summary).toContain("- step 2 (done)");
+    _testSetPhase(null);
+    _testSetSnapshot(null);
+  });
+
+  test("an edit-less response is re-asked once before the phase ends", async () => {
+    _testSetPhase(freshPhase(DRAFT));
+    snapshotWith([VCC_TOOL]);
+    const responses = [
+      assistant([{ type: "text", text: "I read the draft and the transcript." }], "stop"), // no tool calls
+      assistant([{ type: "toolCall", id: "c1", name: "vcc_add", arguments: { section: "Outstanding Context", lines: ["- step 1 (done)"] } }], "stop"),
+    ];
+    let calls = 0;
+    const ctx: any = { hasUI: false, ui: { notify: () => {} }, modelRegistry: { complete: async () => responses[calls++] } };
+    const result = await runCheckLoop({
+      ctx,
+      model: { maxTokens: 4096 },
+      cfg: cfg(), // defaults: maxRounds = 1, emptyRetries = 1
+      signal: undefined,
+      capTokens: 10_000,
+      charsPerToken: 4,
+      reserveTokens: 16384,
+      log: silentLog(),
+    });
+    expect(calls).toBe(2);
+    expect(result.rounds).toBe(2);
+    expect(result.summary).toContain("- step 1 (done)");
+    _testSetPhase(null);
+    _testSetSnapshot(null);
+  });
+
+  test("two edit-less responses end the phase with the untouched draft (retry budget spent)", async () => {
+    _testSetPhase(freshPhase(DRAFT));
+    snapshotWith([VCC_TOOL]);
+    let calls = 0;
+    const ctx: any = {
+      hasUI: false,
+      ui: { notify: () => {} },
+      modelRegistry: {
+        complete: async () => {
+          calls += 1;
+          return assistant([{ type: "text", text: "nothing to add" }], "stop");
+        },
+      },
+    };
+    const result = await runCheckLoop({
+      ctx,
+      model: { maxTokens: 4096 },
+      cfg: cfg(),
+      signal: undefined,
+      capTokens: 10_000,
+      charsPerToken: 4,
+      reserveTokens: 16384,
+      log: silentLog(),
+    });
+    expect(calls).toBe(2); // one attempt + one retry, then it stops
+    expect(result.summary).toBe(DRAFT);
     _testSetPhase(null);
     _testSetSnapshot(null);
   });

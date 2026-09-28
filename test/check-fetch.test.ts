@@ -339,7 +339,7 @@ describe("runCheckLoop: check-request byte verification (integration)", () => {
       capTokens: 10_000,
       charsPerToken: 4,
       maxDraftReads: 3,
-      guard: { rounds: 0, fails: 0, draftReads: 0, done: false },
+      guard: { rounds: 0, fails: 0, draftReads: 0, done: false, edits: 0, emptyRetries: 0 },
       failedOldTexts: new Map<string, number>(),
     };
   }
@@ -368,7 +368,7 @@ describe("runCheckLoop: check-request byte verification (integration)", () => {
       capTokens: 10_000,
       charsPerToken: 4,
       maxDraftReads: 3,
-      guard: { rounds: 0, fails: 0, draftReads: 0, done: false },
+      guard: { rounds: 0, fails: 0, draftReads: 0, done: false, edits: 0, emptyRetries: 0 },
       failedOldTexts: new Map(),
     });
     _testSetSnapshot({
@@ -429,7 +429,7 @@ describe("runCheckLoop: check-request byte verification (integration)", () => {
       capTokens: 10_000,
       charsPerToken: 4,
       maxDraftReads: 3,
-      guard: { rounds: 0, fails: 0, draftReads: 0, done: false },
+      guard: { rounds: 0, fails: 0, draftReads: 0, done: false, edits: 0, emptyRetries: 0 },
       failedOldTexts: new Map(),
     });
     _testSetSnapshot({
@@ -484,7 +484,7 @@ describe("runCheckLoop: check-request byte verification (integration)", () => {
       capTokens: 10_000,
       charsPerToken: 4,
       maxDraftReads: 3,
-      guard: { rounds: 0, fails: 0, draftReads: 0, done: false },
+      guard: { rounds: 0, fails: 0, draftReads: 0, done: false, edits: 0, emptyRetries: 0 },
       failedOldTexts: new Map(),
     });
     _testSetSnapshot({

@@ -19,6 +19,7 @@ import {
   ERR_REPEAT_HINT,
   ERR_TOOL_NOT_ALLOWED,
   ERR_TOOL_OUTSIDE_PHASE,
+  EMPTY_ROUND_NUDGE,
   TOOL_DONE_OK,
   buildTailInstruction,
   draftHeader,
@@ -60,7 +61,16 @@ interface Phase {
   capTokens: number;
   charsPerToken: number;
   maxDraftReads: number;
-  guard: { rounds: number; fails: number; draftReads: number; done: boolean };
+  guard: {
+    rounds: number;
+    fails: number;
+    draftReads: number;
+    done: boolean;
+    /** Successful vcc_add / vcc_delete calls applied so far. */
+    edits: number;
+    /** Times an edit-less round was re-asked (guards.emptyRetries caps this). */
+    emptyRetries: number;
+  };
   failedOldTexts: Map<string, number>;
 }
 
@@ -928,7 +938,10 @@ async function runCheckLoop(args: {
     );
   }
 
-  while (phase!.guard.rounds < cfg.guards.maxRounds) {
+  // rounds counts model requests; the extra emptyRetries attempts are only for
+  // responses that carried no edits at all (see the empty-round branch below).
+  const attemptBudget = cfg.guards.maxRounds + cfg.guards.emptyRetries;
+  while (phase!.guard.rounds < attemptBudget) {
     if (signal?.aborted) throw new Error("vcc-plus: aborted by the user");
 
     const controller = new AbortController();
@@ -1086,7 +1099,24 @@ async function runCheckLoop(args: {
     });
 
     const calls = (response?.content ?? []).filter((part: Any) => part?.type === "toolCall");
-    if (calls.length === 0) break;
+    if (calls.length === 0) {
+      // The phase ends after the response that carries the additions. A response
+      // with no tool calls at all leaves the mechanical draft untouched, which is
+      // strictly worse than one more attempt, so show the model its own reply and
+      // ask again - but only while it has not applied anything yet.
+      if (phase!.guard.edits === 0 && phase!.guard.emptyRetries < cfg.guards.emptyRetries) {
+        phase!.guard.emptyRetries += 1;
+        messages.push({ ...response });
+        messages.push({
+          role: "user",
+          content: [{ type: "text", text: EMPTY_ROUND_NUDGE }],
+          timestamp: Date.now(),
+        });
+        log("empty_round_retry", { round: phase!.guard.rounds, attempt: phase!.guard.emptyRetries });
+        continue;
+      }
+      break;
+    }
 
     messages.push({ ...response });
     for (const call of calls) {
@@ -1108,22 +1138,37 @@ async function runCheckLoop(args: {
         timestamp: Date.now(),
       });
       log("tool", { name, ok: outcome.isError !== true });
+      if (outcome.isError !== true && (name === "vcc_delete" || name === "vcc_add")) {
+        phase!.guard.edits += 1;
+      }
     }
 
     if (phase!.guard.done) break;
+    // The first response that carried edits is the whole supplement pass
+    // (maxRounds = 1 by default); the patch loop keeps running while
+    // maxRounds > 1 and no vcc_done has arrived.
+    if (phase!.guard.rounds >= cfg.guards.maxRounds) break;
     if (phase!.guard.fails >= cfg.guards.maxConsecutiveFails) {
       throw new Error(`vcc-plus: ${phase!.guard.fails} consecutive patch failures; giving up on this compaction`);
     }
   }
 
   if (!phase!.guard.done) {
-    log("loop_end_without_done", { rounds: phase!.guard.rounds, requireDone: cfg.guards.requireDone });
+    // Single-round shape (the default): the phase is designed to end after the
+    // model's one supplement response, so a missing vcc_done is the expected
+    // end state and not worth a warning. The older patch loop (maxRounds > 1)
+    // keeps its warning, because there the model was expected to finish.
+    if (cfg.guards.maxRounds <= 1) {
+      log("single_round_end", { rounds: phase!.guard.rounds, requireDone: cfg.guards.requireDone });
+    } else {
+      log("loop_end_without_done", { rounds: phase!.guard.rounds, requireDone: cfg.guards.requireDone });
+      if (ctx?.hasUI) {
+        ctx.ui.notify("vcc-plus: the model stopped without vcc_done; using the current draft", "warning");
+      }
+    }
     // A text-only "stop" response leaves a cap-validated draft (only
     // successful, P4-checked patches modified it), so the default is to
-    // accept it with a warning. requireDone escalates this to a hard failure.
-    if (ctx?.hasUI) {
-      ctx.ui.notify("vcc-plus: the model stopped without vcc_done; using the current draft", "warning");
-    }
+    // accept it; requireDone escalates this to a hard failure in either shape.
     if (cfg.guards.requireDone) {
       throw new Error("vcc-plus: the model never called vcc_done (guards.requireDone)");
     }
@@ -1243,7 +1288,7 @@ export async function onBeforeCompact(event: Any, ctx: Any, cfg: Config): Promis
     capTokens,
     charsPerToken,
     maxDraftReads: cfg.guards.maxDraftReads,
-    guard: { rounds: 0, fails: 0, draftReads: 0, done: false },
+    guard: { rounds: 0, fails: 0, draftReads: 0, done: false, edits: 0, emptyRetries: 0 },
     failedOldTexts: new Map(),
   };
 
