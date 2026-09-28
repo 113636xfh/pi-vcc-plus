@@ -6,7 +6,11 @@
  *    content copied from the main session file.
  * 2. Sends it as 3 user prompts (short model acks keep the transcript realistic).
  * 3. Fires {"type":"compact"} and waits for the full vcc-plus flow
- *    (draft -> check loop -> vcc_delete / vcc_add -> vcc_done -> summary).
+ *    (draft -> one supplement pass -> vcc_delete / vcc_add -> finalized summary).
+ *
+ * For a timing/usage comparison against native compaction (3+ samples per side, since
+ * one prompt's output varies by ~2.4x run to run) use scripts/bench-compact.mjs
+ * plus scripts/bench-analyze.mjs instead.
  *
  * Usage: node scripts/e2e-rpc-compact-test.mjs [modelRef]
  * Output: JSON lines for every RPC record + a final result line.
