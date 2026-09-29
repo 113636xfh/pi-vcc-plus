@@ -293,8 +293,8 @@ source**; we never modify it):
 
 ## Compared with native compaction (measured)
 
-Setup: e5's local llama.cpp (Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp, `-c 350208 --parallel 2 --kv-unified`,
-q8_0 KV, MTP draft n=3). The sample is a **real coding session** (~180K tokens of live context,
+Setup: llama.cpp served from **2x Tesla V100-SXM2-16GB** (tensor parallel; model Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp,
+`-c 350208 --parallel 2 --kv-unified`, q8_0 KV, MTP draft n=3). The sample is a **real coding session** (~180K tokens of live context,
 including 48 messages with tool calls); both implementations run the same copy of it, serially,
 with an idle server.
 

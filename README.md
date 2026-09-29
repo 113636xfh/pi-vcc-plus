@@ -198,8 +198,8 @@ pi install ./pi-vcc-plus
 
 ## 与原生压缩的对比（实测）
 
-设备与口径：e5 本地 llama.cpp（Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp，`-c 350208 --parallel 2 --kv-unified`，
-q8_0 KV，MTP draft n=3）。样本是一段**真实的编码会话**（有效上下文 ~180K token，内含 48 条带工具调用的消息），
+设备与口径：**2× Tesla V100-SXM2-16GB**（张量并行）上的 llama.cpp 服务端（Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp，
+`-c 350208 --parallel 2 --kv-unified`，q8_0 KV，MTP draft n=3）。样本是一段**真实的编码会话**（有效上下文 ~180K token，内含 48 条带工具调用的消息），
 两种实现跑**同一份会话副本**，串行、服务端空闲。
 
 | 压缩一次（~180K 上下文） | pi 原生 | **pi-vcc-plus** |

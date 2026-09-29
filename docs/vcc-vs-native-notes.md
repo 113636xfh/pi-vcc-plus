@@ -26,7 +26,7 @@ VCC 侧用它的 `compileRanked`（生产预算）本地跑，原生侧直接用
 
 ## 前缀缓存的实测（"字节相同"为什么还不够）
 
-2026-09-23/24 在 e5 的生产服务上做的对照实验（`/v1/chat/completions`，同一段 ~2.9K token 的对话，
+2026-09-23/24 在一台 2×V100 的本地服务上做的对照实验（`/v1/chat/completions`，同一段 ~2.9K token 的对话，
 依次改变一个变量，读响应里的 `usage.prompt_tokens_details.cached_tokens`）：
 
 | 变更 | FastLLM（`--prefix_cache true`） | 说明 |
