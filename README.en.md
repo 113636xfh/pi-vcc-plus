@@ -293,23 +293,34 @@ source**; we never modify it):
 
 ## Compared with native compaction (measured)
 
-Setup: e5's local llama.cpp (`-c 350208 --parallel 2 --kv-unified`, Qwen3.8-27B, q8_0 KV, MTP draft n=3),
-same conversation and model, run serially with an idle server. The same prompt varies by 2.4x in output
-tokens across runs, so the table uses medians (sample size in brackets).
+Setup: e5's local llama.cpp (Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp, `-c 350208 --parallel 2 --kv-unified`,
+q8_0 KV, MTP draft n=3). The sample is a **real coding session** (~180K tokens of live context,
+including 48 messages with tool calls); both implementations run the same copy of it, serially,
+with an idle server.
 
-| | compaction time (~27K context) | prefill at the start of compaction (~200K) | prefill total (~200K) |
-|---|---|---|---|
-| pi native (separate summarization request) | 171 s (n=3) | 113,686 tokens (cold) | 215,697 tokens |
-| **pi-vcc-plus (one supplement pass)** | **196 s (n=6)** | **8,051 tokens** (continues the last request, `cacheRead` hits 213,772) | **113,023 tokens (102,674 saved)** |
+| One compaction (~180K context) | pi native | **pi-vcc-plus** |
+|---|---|---|
+| compaction time | 508 s | **196 s (2.6x faster)** |
+| of which prefill | 112,166 tokens -> 244.0 s | **3,584 tokens -> 15.9 s** (`cacheRead` hits 184,940, i.e. 98% of the context) |
+| of which generation | 8,836 tokens -> 181.8 s | 6,494 tokens -> 178.9 s |
+| summary size | 30,886 chars | 9,774 chars |
+| loading the new context after compaction | 44.3 s | 28.4 s |
 
-At small contexts the plugin is a little slower (the check phase has to think, and the prefix is cheap
-there anyway); what it saves is the **prefill at the start of compaction**, so the payoff appears with a
-large context. On this machine prefill for 120K–220K requests runs at a median of 265–322 tokens/s (a full
-200K prefill is ~620–750 s), so the saved prefill is worth **350–430 s** against the check's extra thinking
-of about **170–350 s**: **at large contexts the two are roughly even, with the plugin slightly ahead**.
+Native's summarization request swaps the system prompt, rearranges the body and drops the tools - 
+token 0 already differs, so the **entire prefix is invalid** and it re-prefills **112,166 tokens**
+every time. The plugin's check request is a strict continuation of the last request, so the prefix
+is byte-identical and the server reuses it, prefilling only the draft and the tail instruction.
+Generation is a wash (in a real session the mechanical draft is already complete, so the model
+only adds a little - which is the other half of where the time goes).
 
-Per-sample data, the prefill rate distribution, the thinking/summary split and the prompt-version
-comparison: [`docs/vcc-vs-native-notes.md`](docs/vcc-vs-native-notes.md).
+**One exception: cold start** (right after `/reload`, or when resuming a session that this process
+never sent a request for). The server holds no KV for that session, so the check request has to be
+rebuilt from the session and sends more raw text than native's digest (measured 194,836 vs 127,838
+tokens) - there the plugin costs more. In normal use compaction happens inside a warm session.
+
+How these numbers were taken (per-sample data, the prefill rate distribution, the thinking/summary
+split, the prompt-version comparison and the cold-start comparison):
+[`docs/vcc-vs-native-notes.md`](docs/vcc-vs-native-notes.md).
 
 ## Tests
 
