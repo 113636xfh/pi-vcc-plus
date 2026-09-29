@@ -9,6 +9,8 @@
 2. **草稿由算法产出，模型只做增删改**：结构、文件清单、长度由 VCC 保证；模型按行号 `vcc_delete`、按节名 `vcc_add` 修正。
 3. **不新增并发**：不起后台 worker、不发独立摘要请求；所有模型调用都在当前会话内顺序发生。
 
+![检查请求的构成](images/02-request.png)
+
 ## 为什么这么切
 
 | 决策 | 原因 |
@@ -100,3 +102,47 @@ assistant 正文。每次剥离写一行 `finalize` 日志（`stripped*` / `rena
 - `src/patch.ts`：`vcc_delete`（行号）/ `vcc_add`（节名）与 diff 回执渲染（无 pi 依赖，可单测）。
 - `src/pi-settings.ts`：读 pi 自己的设置（`images.blockImages`，项目 `.pi/settings.json` 覆盖全局），
   让快照与 pi 的 `convertToLlmWithBlockImages` 逐字节一致。
+
+## 失败处理
+
+![失败处理：fail-closed](images/03-failclosed.png)
+
+| 触发 | 例子 | 行为 |
+|---|---|---|
+| 快照缺失 | 全新会话还没发生过 provider 请求（`/reload` 后先尝试恢复持久化快照；仅全新会话需先发一条消息） | 先恢复 / 重建（`snapshot_restored` / `snapshot_rebuilt`）；三条都拿不到才失败 |
+| tools 不可用/不一致 | 拿不到 wire tools；wire tools 含 grammar/custom 形状、`strict: true`、`defer_loading` | 抛错——这些形状无法逐字节重建，宁可失败也不用降级 tools 破坏前缀 |
+| 编辑被拒 | 行号越界、指向标题或转录区、重复删同一行；追加超出预算；连续失败超限 | 回执里带原因，模型可以改；连续失败到 `maxConsecutiveFails` 就放弃本次压缩 |
+| 模型异常 | API 错误、中止、纯文本收尾但 `requireDone: true`、轮次或草稿读取超限 | 按 `onFailure` 处理 |
+| 响应截断 | 撞上输出上限，但已解析出可用调用 | 应用这些调用并结束这一轮（`round_truncated`）；一个可用调用都没有才算失败 |
+| 检查请求超窗 | 会话本身超出 provider 窗口（pi 的估算偏保守，触发偏晚） | 按 `onContextOverflow`：`trim` 裁剪重试 / `draft` 直接用草稿 / `fail` 走失败策略 |
+
+默认 `onFailure: auto`：手动 `/compact` 直接抛错；自动压缩则取消并通知。`fallbackToNative: false`
+——失败绝不静默退回 pi 原生摘要（静默回退会让"前缀复用"这个目标失效，而用户察觉不到）。
+
+## 日志字段（`~/.pi/agent/vcc-plus/log/<sessionId>.jsonl`）
+
+一行一个 JSON 事件，`debugLog: true` 时写入；纯追加，随时可以删掉重开。
+
+| 事件 | 何时写 | 关键字段 |
+|---|---|---|
+| `vcc_loaded` | 加载扩展、解析到上游 pi-vcc | `version`、`path` |
+| `compact_start` | 每次压缩开始 | `reason`（manual / auto）、`tokensBefore`、`firstKeptEntryId`、`guards`（本次生效的护栏值，可直接看出 config 是否被读到）、`configPath` |
+| `draft` | 机械草稿生成 | `draftChars` / `draftTokens`、`spanMessages`、`charsPerToken`、`calibrated` |
+| `continuation` | 检查请求尾部接上了上一次请求的最后一条回复 | `appended` |
+| `checkPrefix` | 第 1 轮的字节级复核（每次压缩必有一行） | `identical`、`firstDivergence`、`baselineSource`、`baselineTs` |
+| `round` | 每一轮补充请求返回 | `round`、`input`（本轮新增 prefill）、`cacheRead`（命中）、`output`、`expectedPrefixTokens`、`prefixSuspect`、`toolsSource`、`toolsRoundTrip`、`toolsCount` |
+| `tool` | 每次编辑调用 | `name`、`ok` |
+| `empty_round_retry` | 某轮完全没有工具调用，追加提醒重问一次 | `round`、`attempt` |
+| `round_truncated` | 响应撞上输出上限，但已有可应用的调用 | `round`、`calls` |
+| `single_round_end` | 单轮形态正常结束（默认） | `rounds`、`requireDone` |
+| `loop_end_without_done` | 多轮形态（`maxRounds > 1`）模型没调 `vcc_done` 就停 | `rounds` |
+| `summary_final` | 定稿完成 | `rounds`、`chars`、`tokens`、`usage` |
+| `finalize` | 机械剥离 | `strippedTranscriptLines`、`strippedSeparators`、`strippedNotes`、`renamed`、`folded`、`charsBefore` / `charsAfter` |
+| `snapshot_restored` / `snapshot_rebuilt` | 内存里没有快照，改从持久化快照 / 会话本身重建 | — |
+| `check_trimmed` | 检查请求超窗，按服务端报出的真实数字裁剪后重试 | 裁剪报告 |
+| `upstream_recall_registered` / `upstream_recall_failed` | 注册上游只读检索工具的结果 | — |
+| `abort` / `fail_closed` / `fallback_native` | 失败路径 | `why`、`mode`、`message`、`error` |
+
+日常只需两条：`checkPrefix.identical == true`，以及 `round.cacheRead ≈ round.expectedPrefixTokens`
+（此时 `round.prefixSuspect` 为 false）。命中按**块**对齐（vLLM 16 token 一块、FastLLM 2048 token 一块，
+其余后端各有各的块大小），与前缀长度差一块以内属正常，不足一块的尾部本来就要计算。
