@@ -291,30 +291,25 @@ source**; we never modify it):
   algorithm behavior (conservative), intentionally kept identical rather than
   forked.
 
-## Measured (compaction cost)
+## Compared with native compaction (measured)
 
-Same conversation, same model (e5's local Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp under llama.cpp
-`-c 350208 --parallel 2 --kv-unified`), median of 3 samples — the same prompt varies by
-2.4x in output tokens across runs (32,205 / 14,308 / 13,202), so single samples prove nothing.
+Setup: e5's local llama.cpp (`-c 350208 --parallel 2 --kv-unified`, Qwen3.8-27B, q8_0 KV, MTP draft n=3),
+same conversation and model, run serially with an idle server. The same prompt varies by 2.4x in output
+tokens across runs, so the table uses medians (sample size in brackets).
 
-| Context | Native (separate summarization request) | pi-vcc-plus |
-|---|---|---|
-| ~26K | 171.2 s / 9,096 output tokens | 213.9 s / 13,427 output tokens |
+| | compaction time (~27K context) | prefill at the start of compaction (~200K) | prefill total (~200K) |
+|---|---|---|---|
+| pi native (separate summarization request) | 171 s (n=3) | 113,686 tokens (cold) | 215,697 tokens |
+| **pi-vcc-plus (one supplement pass)** | **196 s (n=6)** | **8,051 tokens** (continues the last request, `cacheRead` hits 213,772) | **113,023 tokens (102,674 saved)** |
 
-At small contexts VCC is not ahead; what it saves is the **prefill at the start of
-compaction**, and that only pays off once the context is large:
+At small contexts the plugin is a little slower (the check phase has to think, and the prefix is cheap
+there anyway); what it saves is the **prefill at the start of compaction**, so the payoff appears with a
+large context. On this machine prefill for 120K–220K requests runs at a median of 265–322 tokens/s (a full
+200K prefill is ~620–750 s), so the saved prefill is worth **350–430 s** against the check's extra thinking
+of about **170–350 s**: **at large contexts the two are roughly even, with the plugin slightly ahead**.
 
-| ~200K stage | Native | pi-vcc-plus |
-|---|---|---|
-| prefill at the start of compaction | 113,686 tokens (cold) | **8,051 tokens** (continues the last request, `cacheRead` hits 213,772) |
-| prefill after compaction, loading the new context | 102,011 tokens (cold) | 104,972 tokens (cold, a tie) |
-| **prefill total** | 215,697 tokens | **113,023 tokens (102,674 saved)** |
-
-On this machine prefill for 120K–220K requests runs at a median of **265–322 tokens/s**, so a
-full 200K prefill is **620–750 seconds**. At prefill 290 / generation 60 tokens/s the saved
-prefill is worth about 21,000 generated tokens, which is why ending the compaction phase in a
-single pass is what makes the trade work. Full data, the rate distribution and the exact
-thinking/summary split: [`docs/vcc-vs-native-notes.md`](docs/vcc-vs-native-notes.md).
+Per-sample data, the prefill rate distribution, the thinking/summary split and the prompt-version
+comparison: [`docs/vcc-vs-native-notes.md`](docs/vcc-vs-native-notes.md).
 
 ## Tests
 

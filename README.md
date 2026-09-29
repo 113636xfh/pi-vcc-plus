@@ -196,26 +196,23 @@ pi install ./pi-vcc-plus
 - 草稿的 chars/token 校准沿用上游 `before-compact.ts` 的锚（span 字符 + 上次摘要字符 ÷ `tokensBefore`）：
   这是上游算法的行为（对估算偏保守），我们刻意保持一致、不单方分叉。
 
-## 实测（压缩耗时）
+## 与原生压缩的对比（实测）
 
-同一段对话、同一模型（e5 本地 Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp，llama.cpp `-c 350208 --parallel 2 --kv-unified`），
-每组 3 个样本取中位——同一提示词三次的输出 token 会差 2.4 倍（32,205 / 14,308 / 13,202），单样本不作数。
+设备与口径：e5 本地 llama.cpp（`-c 350208 --parallel 2 --kv-unified`，Qwen3.8-27B，q8_0 KV，MTP draft n=3），
+同一段对话、同一模型，服务端空闲时串行跑。同一提示词三次的输出 token 会差 2.4 倍，因此下表取中位（括号里是样本数）。
 
-| 上下文 | 原生（独立摘要请求） | pi-vcc-plus |
-|---|---|---|
-| ~26K | 171.2 s / 输出 9,096 token | 213.9 s / 输出 13,427 token |
+| | 压缩耗时（~27K 上下文） | 压缩起始 prefill（~200K） | prefill 合计（~200K） |
+|---|---|---|---|
+| pi 原生（独立摘要请求） | 171 s（n=3） | 113,686 token（冷） | 215,697 token |
+| **pi-vcc-plus（单轮补充）** | **196 s（n=6）** | **8,051 token**（续上一次请求，`cacheRead` 命中 213,772） | **113,023 token（省 102,674）** |
 
-小上下文 VCC 不占优；它省掉的是**压缩起始那次全量 prefill**，而这次省只在上下文变大时才值钱：
+小上下文下插件略慢（check 阶段要思考，而那点前缀本来就便宜）；它的收益在大上下文——省掉的是
+**压缩起始那次全量 prefill**。这台机器上 120K–220K 规模的 prefill 中位速率只有 265–322 token/s
+（一次 200K 全量 prefill ≈ 620–750 秒），所以省下的 prefill 值 **350–430 秒**，而 check 多花的思考约
+**170–350 秒**：**大上下文下两者大致打平、插件略优**。
 
-| ~200K 阶段 | 原生 | pi-vcc-plus |
-|---|---|---|
-| 压缩起始 prefill | 113,686 token（冷） | **8,051 token**（续上一次请求，`cacheRead` 命中 213,772） |
-| 压缩完成后加载新上下文 | 102,011 token（冷） | 104,972 token（冷，打平） |
-| **prefill 合计** | 215,697 token | **113,023 token（省 102,674）** |
-
-这台机器上 120K–220K 规模的 prefill 中位速率只有 **265–322 token/s**，即**一次 200K 全量 prefill ≈ 620–750 秒**。
-按 prefill 290 / 生成 60 token/s 折算，省下的 prefill 约等于 21,000 个生成 token 的预算——所以"压缩阶段单轮结束"
-是这笔交易成立的前提。完整数据、速率分布与思考量的精确拆分见 [`docs/vcc-vs-native-notes.md`](docs/vcc-vs-native-notes.md)。
+逐样本数据、prefill 速率分布、思考量拆分与提示词版本对比：
+[`docs/vcc-vs-native-notes.md`](docs/vcc-vs-native-notes.md)。
 
 ## 测试
 
