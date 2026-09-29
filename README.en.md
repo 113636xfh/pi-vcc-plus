@@ -313,13 +313,8 @@ is byte-identical and the server reuses it, prefilling only the draft and the ta
 Generation is a wash (in a real session the mechanical draft is already complete, so the model
 only adds a little - which is the other half of where the time goes).
 
-**One exception: cold start** (right after `/reload`, or when resuming a session that this process
-never sent a request for). The server holds no KV for that session, so the check request has to be
-rebuilt from the session and sends more raw text than native's digest (measured 194,836 vs 127,838
-tokens) - there the plugin costs more. In normal use compaction happens inside a warm session.
-
 How these numbers were taken (per-sample data, the prefill rate distribution, the thinking/summary
-split, the prompt-version comparison and the cold-start comparison):
+split, the prompt-version comparison):
 [`docs/vcc-vs-native-notes.md`](docs/vcc-vs-native-notes.md).
 
 ## Tests
