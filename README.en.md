@@ -370,22 +370,6 @@ and prefix reuse did not hold.
 
 ## Known limitations
 
-- **Cold start**: the snapshot exists only after the extension has observed a
-  new provider request. After `/reload` (a new process, or a project where the
-  extension never ran), `/compact` degrades in three steps: (1) the in-memory
-  snapshot, (2) the persisted snapshot for this session (same session +
-  complete + round-trip OK), (3) a **rebuild from the session itself** —
-  messages from pi's session projection, system prompt from
-  `ctx.getSystemPrompt()`, tools from the active entries of `pi.getAllTools()`
-  — logged as `snapshot_rebuilt`. The rebuild is missing only what the wire can
-  tell: the exact wire tool order/shape and the request-level parameters
-  (`chat_template_kwargs`, `max_tokens`, ...). pi-ai serializes the tools it was
-  given the same way it did for the real request, so the check request still
-  works; if that did diverge, round 1's `prefixSuspect` and the prefix-sentinel
-  both report it (never silent). It fails closed only when the session is
-  empty, pi does not expose the session projection, or no tools are available
-  at all (without tools the model cannot patch) — send one normal message and
-  retry then;
 - the check request is sent by the extension via a direct `ModelRegistry.complete`
   (not the agent streaming path), so hooks like `before_provider_request` do not
   fire for it — its byte-level integrity is verified by the extension's own
