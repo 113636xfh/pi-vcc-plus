@@ -72,6 +72,35 @@ export interface FinalizeReport {
 
 const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+/**
+ * Normalized key for near-duplicate bullets: casefolded, punctuation and
+ * whitespace stripped, CJK kept. Used to dedupe paraphrases — a model that
+ * commits a section in tool calls AND drafts the same section in its thinking
+ * (or restates it in another language) otherwise leaves copies in the summary.
+ */
+const dedupKey = (s: string): string => s.toLowerCase().replace(/[^0-9a-z\u4e00-\u9fff]+/g, "");
+
+/**
+ * Planning residue, not summary content — the same patterns harvestThinking
+ * skips. Applied here as well because the draft chains the previous summary
+ * verbatim: a line leaked in an earlier pass (a section reference like
+ * "[Commits] — probably no commits…", self-deliberation, or a line cut off
+ * mid-sentence with unbalanced parentheses) would otherwise persist forever.
+ */
+const isResidueLine = (text: string): boolean => {
+  const bare = text.replace(/^[-*•]\s+/, ""); // bullets keep their marker
+  const ref = /^\[([^\]\n]{1,80})\]/.exec(bare);
+  if (ref && isSectionHeaderName(ref[1])) return true;
+  if (/\b(don'?t (?:invent|say|add)|not verified|could say|let me (?:write|add|say|do))\b/i.test(text)) {
+    return true;
+  }
+  const open = (text.match(/\(/g) ?? []).length;
+  const close = (text.match(/\)/g) ?? []).length;
+  // A code bullet (backticks) may legitimately contain unbalanced parens, and a
+  // line ending in sentence punctuation is probably complete.
+  return open > close && !text.includes("`") && !/[.!?:;。？！：；]$/.test(text);
+};
+
 /** Matches the note even after upstream's wrapLongLines broke it across lines. */
 const noteRe = (global: boolean): RegExp =>
   new RegExp(RECALL_NOTE.split(/\s+/).map(escapeRe).join("\\s+"), global ? "g" : "");
@@ -168,6 +197,18 @@ export function routeHeader(name: string): { to: CanonicalSection; renamed: bool
   return { to: FOLD_FALLBACK, renamed: false, folded: true };
 }
 
+/**
+ * True when a header names a real section: a canonical name / alias, or a
+ * keyword route. The fold fallback (unknown header -> Outstanding Context) does
+ * NOT count, so an arbitrary "[foo]" in free text is not mistaken for a section
+ * header. Used by the thinking harvest to avoid false positives.
+ */
+export function isSectionHeaderName(name: string): boolean {
+  const clean = name.trim().replace(/\s+/g, " ");
+  if (knownName(clean)) return true;
+  return HEADER_ROUTES.some(([re]) => re.test(name));
+}
+
 type BlockKind = "section" | "transcript" | "note" | "separator" | "omitted" | "content";
 
 function classify(block: string): BlockKind {
@@ -224,12 +265,25 @@ export function finalizeSummary(raw: string): { text: string; report: FinalizeRe
   const sections = new Map<CanonicalSection, string[]>();
   const fallback: string[] = [];
   const push = (section: CanonicalSection, line: string): void => {
-    const trimmed = line.trimEnd();
-    if (!trimmed.trim()) return;
+    const trimmed = line.trimEnd().trim();
+    if (!trimmed) return;
+    if (isResidueLine(trimmed)) return;
     const list = sections.get(section) ?? [];
-    if (list.includes(trimmed.trim())) {
-      report.dedupedBullets += 1;
-      return;
+    const key = dedupKey(trimmed);
+    for (let i = 0; i < list.length; i++) {
+      const k = dedupKey(list[i]);
+      if (k === key || k.includes(key)) {
+        // Identical, or the existing bullet is a superset: drop this one.
+        report.dedupedBullets += 1;
+        return;
+      }
+      if (key && key.includes(k)) {
+        // This bullet subsumes the existing one: keep the richer text in place.
+        list[i] = trimmed;
+        report.dedupedBullets += 1;
+        sections.set(section, list);
+        return;
+      }
     }
     list.push(trimmed);
     sections.set(section, list);

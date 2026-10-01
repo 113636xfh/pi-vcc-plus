@@ -10,8 +10,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { convertToLlm } from "@earendil-works/pi-coding-agent";
 import { configPath, type Config } from "./config";
-import { createLogger, type Logger } from "./log";
-import { finalizeSummary } from "./finalize";
+import { createLogger, createTracer, type Logger } from "./log";
+import { CANONICAL_SECTIONS, finalizeSummary, isSectionHeaderName, routeHeader } from "./finalize";
 import { applyAdd, applyDeletes, effectiveTokensOf, SECTION_RE, tokensOf, type Applied, type Rejected } from "./patch";
 import {
   ERR_DRAFT_READ_CAP,
@@ -19,6 +19,7 @@ import {
   ERR_REPEAT_HINT,
   ERR_TOOL_NOT_ALLOWED,
   ERR_TOOL_OUTSIDE_PHASE,
+  ERR_VCC_DELETE_REDIRECT,
   EMPTY_ROUND_NUDGE,
   TOOL_DONE_OK,
   buildTailInstruction,
@@ -28,7 +29,7 @@ import {
 } from "./prompt";
 import { isBlockImagesEnabled } from "./pi-settings";
 import { loadVcc, type VccModule } from "./vcc";
-
+import { mountCheckView, type LiveCheckView } from "./check-ui";
 type Any = any;
 
 interface Snapshot {
@@ -45,9 +46,11 @@ interface Snapshot {
    * reuse even with a byte-identical message prefix (measured on e5).
    * The custom fetch restores the captured values on the outgoing body. */
   wireParams?: Record<string, unknown>;
-  /** "mismatch" = the wire tools contain shapes that cannot be reconstructed
-   * byte-exactly (grammar/custom tools, strict: true, deferred loading, or an
-   * unrecognized shape) — the check request must fail closed.
+  /** "mismatch" = the wire tools contain a shape we cannot hand the adapter as
+   * a tool parameter at all (a grammar/custom tool, or an entry with no
+   * recoverable JSON schema) — the check request must fail closed.
+   * Provider flags on a schema we *can* read (`strict`, `defer_loading`) are
+   * deliberately not a mismatch: the raw write-back restores them verbatim.
    * "unknown" = the snapshot was rebuilt from the session (cold start), so no
    * wire payload was seen: pi-ai re-serializes the tools itself. */
   toolsRoundTrip?: "ok" | "mismatch" | "unknown";
@@ -213,18 +216,44 @@ export function persistSnapshot(cwd: string | undefined, sessionId: string | und
  * present, round-trip status not "mismatch"). Anything else fails closed.
  */
 export function restoreSnapshot(ctx: Any): boolean {
-  if (snapshot?.tools?.length) return true; // already complete
+  return restoreSnapshotWhy(ctx).ok;
+}
+
+/**
+ * Restore, and say why not.
+ *
+ * A silent false here is the worst kind of failure: the request still works
+ * (rebuildSnapshotFromSession takes over), but it pays a full prefill instead
+ * of reusing the prefix, and the log only shows "no wire snapshot available" —
+ * which does not distinguish "no file yet" from "another session's file" from
+ * "the file is incomplete". Those have different fixes, so the reason is part
+ * of the return value.
+ */
+export function restoreSnapshotWhy(ctx: Any): { ok: boolean; reason: string } {
+  if (snapshot?.tools?.length) return { ok: true, reason: "already in memory" };
   const cwd = typeof ctx?.cwd === "string" ? ctx.cwd : undefined;
   const sessionId = safeSessionId(ctx);
-  if (!cwd || !sessionId) return false;
+  if (!cwd) return { ok: false, reason: "no ctx.cwd" };
+  if (!sessionId) return { ok: false, reason: "no ctx.sessionId" };
   const path = join(cwd, ".pi", "vcc-plus", SNAPSHOT_FILE);
   try {
-    if (!existsSync(path)) return false;
+    if (!existsSync(path)) return { ok: false, reason: `no snapshot file at ${path}` };
     const parsed = JSON.parse(readFileSync(path, "utf8")) as Any;
-    if (parsed?.sessionId !== sessionId) return false; // other session in this cwd
-    if (!Array.isArray(parsed.messages) || parsed.messages.length === 0) return false;
-    if (!Array.isArray(parsed.tools) || parsed.tools.length === 0) return false;
-    if (parsed.toolsRoundTrip === "mismatch") return false;
+    if (parsed?.sessionId !== sessionId) {
+      return {
+        ok: false,
+        reason: `snapshot file belongs to another session (${String(parsed?.sessionId).slice(0, 8)}…, this one is ${sessionId.slice(0, 8)}…)`,
+      };
+    }
+    if (!Array.isArray(parsed.messages) || parsed.messages.length === 0) {
+      return { ok: false, reason: "snapshot file has no messages" };
+    }
+    if (!Array.isArray(parsed.tools) || parsed.tools.length === 0) {
+      return { ok: false, reason: "snapshot file has no tools" };
+    }
+    if (parsed.toolsRoundTrip === "mismatch") {
+      return { ok: false, reason: "snapshot file is a fail-closed tools mismatch" };
+    }
     snapshot = {
       messages: parsed.messages,
       systemPrompt: typeof parsed.systemPrompt === "string" ? parsed.systemPrompt : "",
@@ -237,9 +266,9 @@ export function restoreSnapshot(ctx: Any): boolean {
       prefixTokens: typeof parsed.prefixTokens === "number" ? parsed.prefixTokens : 0,
       at: typeof parsed.ts === "number" ? parsed.ts : 0,
     };
-    return true;
-  } catch {
-    return false;
+    return { ok: true, reason: "restored" };
+  } catch (err) {
+    return { ok: false, reason: `snapshot file unreadable: ${(err as Error)?.message ?? err}` };
   }
 }
 
@@ -314,7 +343,11 @@ export function rebuildSnapshotFromSession(ctx: Any): boolean {
  *    input_schema is exactly what pi-ai regenerates from `parameters`, so
  *    mapping it back round-trips byte-stably.
  * Provider-only fields (cache_control, defer_loading, eager_input_streaming,
- * strict) are dropped: pi-ai re-derives them from the same settings.
+ * strict) are not re-derived here — and do not need to be: buildCheckFetch
+ * writes the captured RAW wire tools back into the body verbatim, so they reach
+ * the wire byte-exact. All this function has to guarantee is that the adapter
+ * receives a usable tool definition (name + JSON schema), which is exactly what
+ * toolsRoundTripStatus checks.
  */
 function toolsFromPayload(payload: Any): Any[] | undefined {
   const tools = payload?.tools;
@@ -339,28 +372,117 @@ function toolsFromPayload(payload: Any): Any[] | undefined {
 }
 
 /**
- * The {name, description, parameters} reconstruction is byte-stable only for
- * plain JSON-schema tools. These wire shapes carry information the wire does
- * not return (constrainedSampling / deferred tool loading), so any of them
- * means the check request's tools would silently differ from the original:
- *  - type: "custom" (grammar tools) — not reconstructable at all
- *  - strict: true — came from constrainedSampling, lost in the wire
- *  - defer_loading — provider-managed deferred tool loading
+ * The wire contract this extension is built on.
+ *
+ * The check request reuses the previous request's prefix by rewriting its body
+ * (raw wire tools in, captured request-level parameters back), which needs an
+ * adapter that (a) takes a custom `fetch` and (b) speaks a JSON request body we
+ * can parse. That is the OpenAI-compatible `/v1/chat/completions` interface —
+ * what OpenAI itself, and the common local servers, expose — plus Anthropic's
+ * messages API, whose tool shape (`input_schema`) is reconstructed exactly.
+ *
+ * Anything else (Google Generative AI / Vertex, Bedrock Converse) does not take
+ * a custom fetch, and its tool encoding cannot be rebuilt from the wire. We do
+ * not degrade silently there: a check request whose prefix quietly diverged
+ * would cost a full prefill and hide the reason. We fail closed, with a message
+ * that names the contract.
+ */
+const SUPPORTED_APIS = new Set(["openai-completions", "anthropic-messages"]);
+
+const CONTRACT =
+  "supported wire: OpenAI-compatible /v1/chat/completions (api \"openai-completions\") " +
+  'or Anthropic messages (api "anthropic-messages")';
+
+/** Adapters that cannot carry the byte-exact prefix rewrite. */
+function unsupportedApiReason(api: unknown): string | null {
+  const id = typeof api === "string" ? api : "";
+  if (!id) return null; // unknown/custom api: let the request decide
+  return SUPPORTED_APIS.has(id)
+    ? null
+    : `this model runs on pi's "${id}" adapter, which is not ${CONTRACT}`;
+}
+
+/**
+ * Tool flags that the *reconstruction* drops but the raw wire-tools write-back
+ * restores, so they must not fail the check request.
+ *
+ * pi-ai emits `strict` on every OpenAI-style tool whenever the model's
+ * `compat.supportsStrictMode !== false` — which is the default — so treating
+ * `strict: true` as unreconstructable made the extension refuse to compact on
+ * essentially every OpenAI-compatible backend (observed: 400-free but
+ * fail-closed on opencode-go). `defer_loading` and `cache_control` are the same
+ * kind of case: provider-owned metadata we never re-derive, and never need to.
+ *
+ * If the raw write-back ever fails to apply, these *are* what pi-ai's own
+ * re-serialization would drop — and that shows up where it belongs, in the
+ * `checkPrefix` log (identical=false, or fetchCalled=false), not as a guess made
+ * before the request.
+ */
+const RESTORED_BY_RAW_WRITEBACK = new Set(["strict", "defer_loading", "cache_control", "eager_input_streaming"]);
+
+/** Flags present in the captured wire tools that only the write-back preserves. */
+export function wireToolCaveats(wireTools: Any): string[] {
+  if (!Array.isArray(wireTools)) return [];
+  const found = new Set<string>();
+  for (const t of wireTools) {
+    if (!t || typeof t !== "object") continue;
+    for (const holder of [t, t.function]) {
+      if (!holder || typeof holder !== "object") continue;
+      for (const [key, value] of Object.entries(holder)) {
+        if (RESTORED_BY_RAW_WRITEBACK.has(key) && value != null && value !== false) found.add(key);
+      }
+    }
+  }
+  return [...found].sort();
+}
+
+/**
+ * Can we hand the adapter a usable tool definition for every wire tool?
+ *
+ * That is the only thing this has to answer, because the bytes that reach the
+ * wire come from the raw capture (buildCheckFetch writes `wireTools` back
+ * verbatim) — not from this reconstruction. So the failure cases are only the
+ * shapes with no JSON schema to pass along:
+ *  - type: "custom" (grammar tools) — not a JSON-schema tool at all
  *  - unrecognized shape — no function.parameters / input_schema / parameters
+ *
+ * Provider flags that merely ride along on a readable schema (`strict`,
+ * `defer_loading`) are NOT failures: pi-ai's own re-serialization would drop
+ * them, but it never gets to run — the write-back replaces the whole array. See
+ * wireToolCaveats.
  */
 export function toolsRoundTripStatus(wireTools: Any): "ok" | "mismatch" | undefined {
   if (!Array.isArray(wireTools)) return undefined;
   for (const t of wireTools) {
     if (!t || typeof t !== "object") return "mismatch";
+    // A grammar tool carries no JSON schema at all, so there is nothing to hand
+    // the adapter as a tool parameter — unlike strict/defer_loading, which ride
+    // along on a schema we do have and are restored by the raw write-back.
     if (t.type === "custom" || t.custom) return "mismatch";
-    if (t.strict === true || t.function?.strict === true) return "mismatch";
-    if (t.defer_loading === true || t.function?.defer_loading === true) return "mismatch";
     const hasOpenAiFunction = !!t.function && typeof t.function.name === "string";
     const hasAnthropicSchema = typeof t.name === "string" && !!t.input_schema;
     const hasPlainSchema = typeof t.name === "string" && !!t.parameters;
     if (!hasOpenAiFunction && !hasAnthropicSchema && !hasPlainSchema) return "mismatch";
   }
   return "ok";
+}
+
+/**
+ * Why the wire tools cannot be rebuilt byte-exactly, in words. `toolsRoundTrip`
+ * answers *whether*; this answers *which shape* — "unknown shape" on its own is
+ * unactionable, whereas "Google functionDeclarations" tells the reader their
+ * backend is outside the contract.
+ */
+export function unsupportedToolReason(wireTools: Any): string | null {
+  if (!Array.isArray(wireTools)) return null;
+  for (const t of wireTools) {
+    if (!t || typeof t !== "object") return "a tool entry is not an object";
+    if (t.type === "custom" || t.custom) return "grammar-constrained tool (type: custom)";
+    if (t.functionDeclarations) return "Google functionDeclarations tool encoding";
+    if (t.toolSpec) return "Bedrock toolSpec tool encoding";
+    if (!t.function?.name && !t.name) return "an unrecognized tool shape";
+  }
+  return null;
 }
 
 /**
@@ -871,6 +993,230 @@ const addUsage = (target: Usage, source: Any): void => {
   target.totalTokens += source.totalTokens ?? (source.input ?? 0) + (source.output ?? 0);
 };
 
+/**
+ * One check round's model request, streamed into the live view.
+ *
+ * pi-ai's `complete` is literally `stream(...).result()`, so the message this
+ * returns is the one `complete` would have returned and every check below it is
+ * unchanged — the only difference is that the deltas pass through on the way.
+ *
+ * `stream` is optional on the registry (pi's peer range is `*`), so a registry
+ * without it falls back to `complete`: the check still runs, it just is not
+ * rendered live.
+ */
+/**
+ * One check request's outcome: the final AssistantMessage plus the thinking
+ * stream it produced. `truncated` is true when we aborted the stream ourselves
+ * because the thinking hit `thinkingCapChars`; the response then carries
+ * stopReason "aborted" by design and its tool calls (if any) are not applied —
+ * the harvested thinking is the supplement instead.
+ */
+interface CheckRoundResult {
+  response: Any;
+  thinking: string;
+  thinkingChars: number;
+  truncated: boolean;
+}
+
+async function requestCheckRound(args: {
+  ctx: Any;
+  model: Any;
+  messages: Any[];
+  tools: Any[];
+  systemPrompt: string | undefined;
+  options: Any;
+  view: LiveCheckView;
+  /** Hard cap on thinking characters. 0 / undefined = no cap. */
+  thinkingCapChars?: number;
+  /** Aborted when the cap is hit (the same controller the timeout/user use). */
+  controller?: AbortController;
+}): Promise<CheckRoundResult> {
+  const { ctx, model, messages, tools, systemPrompt, options, view } = args;
+  const cap = args.thinkingCapChars ?? 0;
+  if (typeof ctx?.modelRegistry?.stream !== "function") {
+    const response = await ctx.modelRegistry.complete(model, { systemPrompt, messages, tools }, options);
+    const thinking = (response?.content ?? [])
+      .filter((part: Any) => part?.type === "thinking")
+      .map((part: Any) => String(part?.thinking ?? ""))
+      .join("\n");
+    return { response, thinking, thinkingChars: thinking.length, truncated: false };
+  }
+  const stream = ctx.modelRegistry.stream(model, { systemPrompt, messages, tools }, options);
+  let thinking = "";
+  let truncated = false;
+  for await (const event of stream as AsyncIterable<Any>) {
+    view.push(event);
+    if (event?.type === "thinking_delta") {
+      thinking += String(event.delta ?? "");
+      // The universal force-truncate: provider-independent. We cannot stop the
+      // model mid-thinking and let it continue, but we can cut the stream at a
+      // cap and keep what it thought — that is the supplement source.
+      if (cap > 0 && thinking.length > cap && !truncated) {
+        truncated = true;
+        args.controller?.abort();
+      }
+    }
+  }
+  const response = await stream.result();
+  return { response, thinking, thinkingChars: thinking.length, truncated };
+}
+
+/**
+ * Extract the summary sections a model drafted inside its thinking stream.
+ *
+ * Fast reasoning models frequently write the whole supplement as `[Section]`
+ * blocks in their thinking and then under-commit it (or never commit it, when we
+ * cut the stream at the thinking cap). This recovers those drafted sections:
+ * a bracket / markdown header that names a real section opens a block, and the
+ * bullet lines under it are its content. Meta-reasoning prose (no bullets) and
+ * arbitrary `[foo]` headers (not a known section) are ignored, so harvesting a
+ * model that never drafted sections returns null and changes nothing.
+ */
+function detectSectionHeader(line: string): string | null {
+  let t = line.trim();
+  // Models often number the sections they plan ("1. [Results]:") — strip a
+  // leading list marker so those still read as headers.
+  t = t.replace(/^(?:\d{1,3}[.)]|[-*•])\s+/, "");
+  let m: RegExpExecArray | null;
+  // Trailing text is allowed ("[Key Decisions] — missing entirely. …:") — a
+  // model analyzing the draft annotates the header line it plans to fill.
+  // Only names that routeHeader accepts open a section, so this cannot be
+  // hijacked by arbitrary bracketed prose.
+  if ((m = /^\[([^\]\n]{1,80})\]/.exec(t))) return m[1]; // [Name] / [Name]: / [Name] — …
+  if ((m = /^#{1,6}\s+([^\n#]{1,80}?)\s*:?$/.exec(t))) return m[1]; // ## Name / ## Name:
+  if ((m = /^([A-Za-z][A-Za-z &/-]{1,79})\s*:$/.exec(t))) return m[1]; // Name:
+  return null;
+}
+
+function harvestThinking(thinking: string): string | null {
+  const lines = String(thinking ?? "").split("\n").map((l) => l.trim());
+  const sections = new Map<string, string[]>();
+  const bulletRe = /^\s*(?:[-*•]|\d{1,2}[.)])\s+/;
+  let open: string | null = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line) continue;
+    const name = detectSectionHeader(line);
+    if (name !== null) {
+      const afterBracket = line.includes("]") ? line.slice(line.indexOf("]") + 1).trimStart() : "";
+      // "[Name] (add specifics)" / "[Name] (new section)" is a plan annotation
+      // about an edit, not a section header: keep whatever was open.
+      if (afterBracket.startsWith("(")) continue;
+      // A header line must actually introduce bullets: a model's plan list
+      // ("3. [Key Decisions] — add (new section).") is followed by the next
+      // entry, so it closes the section instead.
+      let j = i + 1;
+      while (j < Math.min(i + 3, lines.length) && !lines[j]) j++;
+      const followedByBullet = j < lines.length && bulletRe.test(lines[j]);
+      open = isSectionHeaderName(name) && followedByBullet ? routeHeader(name).to : null;
+      continue;
+    }
+    const bullet = bulletRe.exec(line);
+    if (open && bullet) {
+      const text = line.replace(/^\s*(?:[-*•]|\d{1,2}[.)])\s+/, "").trim();
+      if (!text) continue;
+      // Planning residue, not summary content: a bare section reference
+      // ("[Files And Changes] (add specifics)") or self-deliberation
+      // ("bun version? Not verified. Don't invent.") stays out of the draft.
+      if (/^\[[^\]\n]{1,80}\]/.test(text)) continue;
+      if (/\b(don'?t (?:invent|say|add)|not verified|could say|let me (?:write|add|say|do))\b/i.test(text)) continue;
+      const list = sections.get(open) ?? [];
+      if (!list.includes(text)) list.push(text);
+      sections.set(open, list);
+    }
+  }
+  const parts: string[] = [];
+  for (const name of CANONICAL_SECTIONS) {
+    const bullets = sections.get(name);
+    if (bullets?.length) parts.push(`[${name}]\n${bullets.map((b) => `- ${b}`).join("\n")}`);
+  }
+  return parts.length > 0 ? parts.join("\n\n") : null;
+}
+
+/**
+ * Transient check-request failures: worth sending again.
+ *
+ * A dropped connection says nothing about the draft, and failing the whole
+ * compaction on one throws away the session's context over a flaky socket
+ * (observed: opencode-go returning a bare "Connection error." mid-check).
+ * pi-ai resolves rather than rejects on API errors, so this reads
+ * `stopReason` + `errorMessage` off the response.
+ *
+ * Conservative by design: an unrecognised message is NOT transient and fails
+ * closed as before. Guessing wrong in that direction costs a retry; guessing
+ * wrong in the other direction silently compacts with a broken draft.
+ */
+const TRANSIENT_FAILURE = [
+  /\b(408|425|429|500|502|503|504|529)\b/,
+  /connection error/i,
+  /ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EPIPE|EAI_AGAIN|ENOTFOUND|UND_ERR_[A-Z_]+/,
+  /socket hang up/i,
+  /fetch failed/i,
+  // undici's wording when the peer drops a stream mid-response. It arrives with
+  // no status code at all, so it is easy to miss and was: one "terminated"
+  // failed a whole compaction before this list existed.
+  /terminated/i,
+  /premature close/i,
+  /(connection|stream) (closed|reset)/i,
+  /other side closed/i,
+  /network (error|failure)/i,
+  /timed?\s?out|timeout/i,
+  /temporarily unavailable/i,
+  /service unavailable/i,
+  /bad gateway/i,
+  /gateway timeout/i,
+  /rate limit|too many requests/i,
+  /overloaded/i,
+  /internal server error/i,
+];
+
+/** Permanent failures: retrying sends the identical request and fails again. */
+const PERMANENT_FAILURE = [
+  /\b(400|401|403|404|405|413|414|422)\b/,
+  /MissingSessionID/i,
+  /context (length|window|limit)/i,
+  /context[_ ]?overflow/i,
+  /prompt is too long/i,
+  /maximum context length/i,
+  /too many tokens/i,
+  /invalid[_ ]?(api[_ ]?key|request|argument)/i,
+];
+
+/** The reason to retry, or null when this failure must not be retried. */
+export function transientCheckFailure(response: Any): string | null {
+  const stop = String(response?.stopReason ?? "");
+  if (stop === "aborted") return null;
+  const message = String(response?.errorMessage ?? "").slice(0, 400);
+  if (!message && stop !== "error") return null;
+  // Permanent first: a 400 can also mention a timeout, and retrying a request
+  // the provider already rejected on its merits only delays the real error.
+  if (PERMANENT_FAILURE.some((re) => re.test(message))) return null;
+  if (!TRANSIENT_FAILURE.some((re) => re.test(message))) return null;
+  return message || `stopReason=${stop}`;
+}
+
+/** 1s, 2s, 4s … capped, with jitter so parallel sessions do not sync up. */
+export function retryBackoffMs(attempt: number, base = 1000, cap = 15000): number {
+  const raw = Math.min(cap, base * 2 ** attempt);
+  return Math.round(raw * (0.7 + Math.random() * 0.6));
+}
+
+/** Sleep that resolves false when the phase was aborted while waiting. */
+async function sleepAbortable(ms: number, signal: Any): Promise<boolean> {
+  if (ms <= 0) return !signal?.aborted;
+  return new Promise<boolean>((resolve) => {
+    const done = (ok: boolean) => {
+      clearTimeout(timer);
+      signal?.removeEventListener?.("abort", onAbort);
+      resolve(ok);
+    };
+    const timer = setTimeout(() => done(true), ms);
+    const onAbort = () => done(false);
+    signal?.addEventListener?.("abort", onAbort, { once: true });
+    if (signal?.aborted) done(false);
+  });
+}
+
 async function runCheckLoop(args: {
   ctx: Any;
   model: Any;
@@ -879,14 +1225,20 @@ async function runCheckLoop(args: {
   capTokens: number;
   charsPerToken: number;
   reserveTokens: number;
+  /** prep.tokensBefore, for the live view's heading. */
+  tokensBefore?: number;
   /** What pi keeps verbatim after the cut (settings value + the concrete tail). */
   keptTurns?: { keepRecentTokens: number; messages: number; tokens: number };
   customInstructions?: string;
+  /** Live view override (tests). Production mounts its own from ctx.ui. */
+  view?: LiveCheckView;
   log: Logger;
 }): Promise<{ summary: string; usage: Usage; rounds: number }> {
   const { ctx, model, cfg, signal, capTokens, charsPerToken, reserveTokens, customInstructions, log } = args;
   const keptTurns = args.keptTurns ?? { keepRecentTokens: 0, messages: 0, tokens: 0 };
   const usage = emptyUsage();
+  // Thinking streamed across the rounds, harvested at finalize into the draft.
+  let allThinking = "";
   // Byte-level verification of the check request (round 1 only): the custom
   // fetch below injects the captured wire tools verbatim and captures the
   // outgoing body, which is then compared against the previous real
@@ -907,6 +1259,7 @@ async function runCheckLoop(args: {
     draftTokens,
     keptTurns,
     customInstructions,
+    thinkingCapChars: cfg.guards.thinkingCapChars,
   });
   const continuation = snapshotContinuationAssistant(ctx);
   const messages: Any[] = [
@@ -922,44 +1275,97 @@ async function runCheckLoop(args: {
   if (continuation) log("continuation", { appended: true });
 
   const tools = snapshot?.tools;
+  // Fail closed: the wire tools contained a shape that cannot be reconstructed
+  // byte-exactly (grammar/custom, strict: true, deferred loading, or a backend
+  // encoding outside the contract) — a degraded check request would break the
+  // prefix. Checked before the empty-tools case because it names the cause.
+  if (snapshot?.toolsRoundTrip === "mismatch") {
+    const shape = unsupportedToolReason(snapshot?.wireTools);
+    throw new Error(
+      `vcc-plus: the last request's wire tools are not byte-reconstructable` +
+        (shape ? ` (${shape})` : "") +
+        `; refusing a degraded check request — ${CONTRACT}`,
+    );
+  }
   // Fail closed: without the last request's tools the check request cannot
   // reuse the prefix and the model would not even see the vcc_* tools.
   if (!tools?.length) {
+    const api = unsupportedApiReason(model?.api);
     throw new Error(
-      "vcc-plus: no tool definitions in the last-request snapshot; the check request could not reuse the prefix",
-    );
-  }
-  // Fail closed: the wire tools contained a shape that cannot be
-  // reconstructed byte-exactly (grammar/custom, strict: true, deferred
-  // loading, unknown) — a degraded check request would break the prefix.
-  if (snapshot?.toolsRoundTrip === "mismatch") {
-    throw new Error(
-      "vcc-plus: last request's wire tools are not byte-reconstructable (strict/grammar/deferred or unknown shape); refusing a degraded check request",
+      `vcc-plus: no tool definitions in the last-request snapshot; the check request could not reuse the prefix` +
+        (api ? ` — ${api}` : ` (${CONTRACT})`),
     );
   }
 
   // rounds counts model requests; the extra emptyRetries attempts are only for
   // responses that carried no edits at all (see the empty-round branch below).
   const attemptBudget = cfg.guards.maxRounds + cfg.guards.emptyRetries;
+  // Live view for the whole phase: a compaction-colored box above the editor
+  // that streams the model's supplement as it arrives. Removed in `finally`,
+  // so nothing survives the phase (pi then renders its own [compaction] box).
+  //
+  // debugTrace: the tracer is created here rather than per-round so it also
+  // receives the tool results, which the engine produces in the dispatch loop
+  // and never sends through the stream.
+  const trace = createTracer(safeSessionId(ctx), cfg.debugTrace);
+  if (trace.path) trace.note(`model: ${model?.id ?? "?"} · draft ${draftTokens} tokens / cap ${capTokens} tokens`);
+  const view: LiveCheckView =
+    args.view ??
+    mountCheckView(ctx?.ui, {
+      draft: phase!.draft,
+      draftTokens,
+      capTokens,
+      tokensBefore: Number(args.tokensBefore) || 0,
+      expanded: ctx?.ui?.getToolsExpanded?.() === true,
+      trace,
+      verbose: cfg.debugTrace,
+    });
+  try {
   while (phase!.guard.rounds < attemptBudget) {
     if (signal?.aborted) throw new Error("vcc-plus: aborted by the user");
 
-    const controller = new AbortController();
-    // No time-based guardrails by default: slow local models are expected.
-    const timer = cfg.guards.callTimeoutMs > 0
-      ? setTimeout(() => controller.abort(), cfg.guards.callTimeoutMs)
-      : undefined;
-    const onAbort = () => controller.abort();
-    signal?.addEventListener?.("abort", onAbort, { once: true });
-
+    // Coerced rather than trusted: a hand-edited config with a string, null or
+    // NaN here would make Math.max return NaN, and `attempt >= NaN` is false
+    // forever — silently disabling the very retry this exists for.
+    const retrySetting = Number(cfg.guards?.maxRequestRetries);
+    const maxRetries = Number.isFinite(retrySetting) ? Math.max(0, Math.trunc(retrySetting)) : 0;
     let response: Any;
-    try {
-      response = await ctx.modelRegistry.complete(
+    // The thinking this round produced (harvested at finalize), and whether we
+    // cut the stream at the thinking cap — a planned "aborted", not a failure.
+    let roundThinking = "";
+    let thinkingTruncated = false;
+    // Transient transport failures are retried rather than failing the phase:
+    // see transientCheckFailure(). The retry lives INSIDE the round loop, so a
+    // resend does not consume one of maxRounds — rounds still counts only the
+    // responses the model actually produced.
+    for (let attempt = 0; ; attempt++) {
+      const controller = new AbortController();
+      // No time-based guardrails by default: slow local models are expected.
+      const timer = cfg.guards.callTimeoutMs > 0
+        ? setTimeout(() => controller.abort(), cfg.guards.callTimeoutMs)
+        : undefined;
+      const onAbort = () => controller.abort();
+      signal?.addEventListener?.("abort", onAbort, { once: true });
+      try {
+        const roundResult = await requestCheckRound({
+        ctx,
         model,
-        { systemPrompt: snapshot?.systemPrompt, messages, tools },
-        {
+        messages,
+        tools,
+        systemPrompt: snapshot?.systemPrompt,
+        view,
+        thinkingCapChars: cfg.guards.thinkingCapChars,
+        controller,
+        options: {
           maxTokens: capTokens,
           signal: controller.signal,
+          // pi's own turns pass sessionId, and pi-ai only adds the
+          // session-affinity headers when it is set (x-session-affinity /
+          // x-client-request-id / session_id). Gateways route on it and reject
+          // the request outright without it (observed: opencode.ai returns
+          // 400 MissingSessionID), so dropping it here made the check request
+          // unroutable while every normal turn worked.
+          sessionId: safeSessionId(ctx),
           // Only align the request-level parameters when configured to: they
           // are required where the provider re-renders the prefix or keys its
           // cache on them, and cost thinking time where they are not.
@@ -969,11 +1375,53 @@ async function runCheckLoop(args: {
             cfg.alignCheckParams === false ? undefined : snapshot?.wireParams,
           ),
         },
-      );
+      });
+        response = roundResult.response;
+        roundThinking = roundResult.thinking;
+        thinkingTruncated = roundResult.truncated;
     } finally {
-      if (timer) clearTimeout(timer);
-      signal?.removeEventListener?.("abort", onAbort);
+        if (timer) clearTimeout(timer);
+        signal?.removeEventListener?.("abort", onAbort);
+      }
+
+      const reason = attempt >= maxRetries || signal?.aborted ? null : transientCheckFailure(response);
+      if (!reason) break;
+      const delayMs = retryBackoffMs(attempt);
+      log("check_retry", { attempt: attempt + 1, of: maxRetries, reason: reason.slice(0, 200), delayMs });
+      // The failed attempt may already have streamed a partial buffer into the
+      // view and the trace, both append-only per contentIndex — without a reset
+      // the retry's content would splice itself onto the wreckage.
+      view.reset();
+      trace.note(`retry ${attempt + 1}/${maxRetries} after: ${reason.slice(0, 200)} — waiting ${delayMs}ms`);
+      if (!(await sleepAbortable(delayMs, signal))) break;
     }
+
+    // A planned thinking-cap truncation: we aborted the stream ourselves at the
+    // cap, so the response is "aborted" by design and its (absent) tool calls
+    // are not applied. The model's thinking is harvested at finalize. End the
+    // phase — the mechanical draft plus the harvested thinking is the summary.
+    if (thinkingTruncated) {
+      phase!.guard.rounds += 1;
+      addUsage(usage, response?.usage);
+      trace.round(phase!.guard.rounds);
+      if (roundThinking) allThinking += (allThinking ? "\n" : "") + roundThinking;
+      log("thinking_capped", {
+        chars: roundThinking.length,
+        cap: cfg.guards.thinkingCapChars,
+        rounds: phase!.guard.rounds,
+      });
+      if (ctx?.hasUI) {
+        ctx.ui.notify(
+          `vcc-plus: the model's thinking hit the ${cfg.guards.thinkingCapChars}-char cap; stopping it and harvesting what it drafted`,
+          "info",
+        );
+      }
+      break;
+    }
+
+    // Not truncated: this round's thinking still feeds the harvest at finalize
+    // (the model may have drafted sections it did not fully commit).
+    if (roundThinking) allThinking += (allThinking ? "\n" : "") + roundThinking;
 
     // Fail closed on non-successful responses. pi-ai RESOLVES (does not
     // reject) with the AssistantMessage itself on API errors and aborts —
@@ -1045,6 +1493,7 @@ async function runCheckLoop(args: {
 
     phase!.guard.rounds += 1;
     addUsage(usage, response?.usage);
+    trace.round(phase!.guard.rounds);
 
     // Verify the check request's bytes against the last real request (once,
     // on the first round). The body is written next to the sentinel's files
@@ -1092,6 +1541,7 @@ async function runCheckLoop(args: {
     }
 
     const prefixTokens = snapshot?.prefixTokens ?? 0;
+  const caveats = wireToolCaveats(snapshot?.wireTools);
     const cacheRead = response?.usage?.cacheRead ?? 0;
     const cacheSuspect = prefixTokens > 0 && cacheRead < prefixTokens * 0.5;
     log("round", {
@@ -1104,6 +1554,10 @@ async function runCheckLoop(args: {
       toolsSource: snapshot?.toolsSource,
       toolsRoundTrip: snapshot?.toolsRoundTrip,
       toolsCount: snapshot?.tools?.length ?? 0,
+      // Flags the reconstruction drops and only the raw write-back restores.
+      // If checkPrefix above reports identical=false or fetchCalled=false, this
+      // list is exactly what diverged.
+      ...(caveats.length > 0 ? { toolsOnlyByWriteback: caveats } : {}),
     });
 
     const calls = parsedCalls;
@@ -1139,7 +1593,10 @@ async function runCheckLoop(args: {
     for (const call of calls) {
       const name = String(call?.name ?? "");
       let outcome: ToolOutcome;
-      if (name === "vcc_delete") outcome = toolDelete(call?.arguments ?? {});
+      // vcc_delete is no longer registered, but 49% of compactions used to call
+      // it. Answer with the replacement instead of a generic rejection, so the
+      // model spends one call on the right tool instead of probing the closed set.
+      if (name === "vcc_delete") outcome = text(ERR_VCC_DELETE_REDIRECT, true);
       else if (name === "vcc_add") outcome = toolAdd(call?.arguments ?? {});
       else if (name === "vcc_draft") outcome = toolDraft(call?.arguments ?? {});
       else if (name === "vcc_done") outcome = toolDone();
@@ -1155,7 +1612,16 @@ async function runCheckLoop(args: {
         timestamp: Date.now(),
       });
       log("tool", { name, ok: outcome.isError !== true });
-      if (outcome.isError !== true && (name === "vcc_delete" || name === "vcc_add")) {
+      if (trace.path) {
+        trace.toolResult(
+          name,
+          Array.isArray(outcome.content)
+            ? outcome.content.map((c: Any) => c?.text ?? "").join("\n")
+            : String(outcome.content ?? ""),
+          outcome.isError === true,
+        );
+      }
+      if (outcome.isError !== true && name === "vcc_add") {
         phase!.guard.edits += 1;
       }
     }
@@ -1168,6 +1634,14 @@ async function runCheckLoop(args: {
     if (phase!.guard.fails >= cfg.guards.maxConsecutiveFails) {
       throw new Error(`vcc-plus: ${phase!.guard.fails} consecutive patch failures; giving up on this compaction`);
     }
+  }
+  } finally {
+    // The live view exists only for the duration of the phase: pi renders the
+    // durable `[compaction]` box into the transcript right after.
+    view.dispose();
+    // The trace outlives the view on purpose: the terminal scrolls, the file
+    // does not, and the box is gone by the time anyone wants to read it.
+    trace.close();
   }
 
   if (!phase!.guard.done) {
@@ -1188,6 +1662,20 @@ async function runCheckLoop(args: {
     // accept it; requireDone escalates this to a hard failure in either shape.
     if (cfg.guards.requireDone) {
       throw new Error("vcc-plus: the model never called vcc_done (guards.requireDone)");
+    }
+  }
+  // Recover the sections the model drafted in its thinking but did not (fully)
+  // commit — either it under-committed, or we cut the stream at the thinking
+  // cap. Appending here lets finalizeSummary merge + dedup them against the
+  // mechanical draft and any committed edits.
+  if (allThinking) {
+    const harvested = harvestThinking(allThinking);
+    if (harvested) {
+      phase!.draft = phase!.draft ? `${phase!.draft}\n\n${harvested}` : harvested;
+      log("thinking_harvest", { thinkingChars: allThinking.length, harvestedChars: harvested.length });
+      if (ctx?.hasUI) {
+        ctx.ui.notify("vcc-plus: folded the model's drafted thinking into the summary", "info");
+      }
     }
   }
   // The draft is a reader's artifact (sections + a mechanical transcript of the
@@ -1211,6 +1699,10 @@ export async function onBeforeCompact(event: Any, ctx: Any, cfg: Config): Promis
   const prep = event?.preparation;
   const log = createLogger(safeSessionId(ctx), cfg.debugLog);
   const reason = String(event?.reason ?? "auto");
+  // pi sets event.signal when the user cancels; callTimeoutMs aborts the
+  // per-attempt controller instead, so this is specifically "the user
+  // stopped it" and not merely "the call did not finish".
+  const userAborted = event?.signal?.aborted === true;
   log("compact_start", {
     reason,
     willRetry: event?.willRetry ?? false,
@@ -1233,7 +1725,7 @@ export async function onBeforeCompact(event: Any, ctx: Any, cfg: Config): Promis
     log("vcc_loaded", { version: vcc.version, path: vcc.packageDir });
   } catch (error) {
     log("abort", { why: "pi-vcc not available", error: String(error) });
-    return fail(cfg, ctx, log, reason, String(error), prep);
+    return fail(cfg, ctx, log, reason, String(error), prep, { userAborted });
   }
 
   let model: Any;
@@ -1244,7 +1736,7 @@ export async function onBeforeCompact(event: Any, ctx: Any, cfg: Config): Promis
   }
   if (!model) {
     log("abort", { why: "no model" });
-    return fail(cfg, ctx, log, reason, "no usable model", prep);
+    return fail(cfg, ctx, log, reason, "no usable model", prep, { userAborted });
   }
 
   const reserveTokens = prep?.settings?.reserveTokens ?? 16384;
@@ -1258,19 +1750,22 @@ export async function onBeforeCompact(event: Any, ctx: Any, cfg: Config): Promis
     charsPerToken = compiled.charsPerToken;
   } catch (error) {
     log("abort", { why: "draft failed", error: String(error) });
-    return fail(cfg, ctx, log, reason, `draft generation failed: ${String(error)}`, prep);
+    return fail(cfg, ctx, log, reason, `draft generation failed: ${String(error)}`, prep, { userAborted });
   }
 
   if (!draft.trim()) {
     log("abort", { why: "empty draft" });
-    return fail(cfg, ctx, log, reason, "mechanical draft was empty", prep);
+    return fail(cfg, ctx, log, reason, "mechanical draft was empty", prep, { userAborted });
   }
 
   if (!snapshot?.messages?.length) {
     // Cold start: module state died with the previous process (e.g. /reload).
     // Reuse the last complete snapshot persisted for this session, if one
     // exists; otherwise fall through to the cold-start rebuild below.
-    if (restoreSnapshot(ctx)) {
+    // A restore miss costs a full prefill, so it always says which of the
+    // several reasons it was — see restoreSnapshotWhy.
+    const restored = restoreSnapshotWhy(ctx);
+    if (restored.ok) {
       log("snapshot_restored", {
         at: snapshot?.at ?? 0,
         tools: snapshot?.tools?.length ?? 0,
@@ -1286,6 +1781,7 @@ export async function onBeforeCompact(event: Any, ctx: Any, cfg: Config): Promis
         tools: snapshot?.tools?.length ?? 0,
         systemPromptChars: snapshot?.systemPrompt?.length ?? 0,
         prefixTokens: snapshot?.prefixTokens ?? 0,
+        restoreMiss: restored.reason,
         note: "no wire snapshot available: wire tool order/shape and request-level parameters are unknown",
       });
     }
@@ -1305,6 +1801,7 @@ export async function onBeforeCompact(event: Any, ctx: Any, cfg: Config): Promis
       reason,
       "no snapshot of the last provider request yet, and the session has nothing to rebuild one from (empty session, or pi did not expose the session projection/tools). Send one normal message first, then run /compact again",
       prep,
+      { userAborted },
     );
   }
 
@@ -1333,6 +1830,7 @@ export async function onBeforeCompact(event: Any, ctx: Any, cfg: Config): Promis
       capTokens,
       charsPerToken,
       reserveTokens,
+      tokensBefore: prep?.tokensBefore,
       keptTurns: keptTurnStats(ctx, prep),
       customInstructions: typeof event?.customInstructions === "string" ? event.customInstructions : undefined,
       log,
@@ -1376,7 +1874,7 @@ export async function onBeforeCompact(event: Any, ctx: Any, cfg: Config): Promis
       );
       if (fallback) return fallback;
     }
-    return fail(cfg, ctx, log, reason, String(error), prep);
+    return fail(cfg, ctx, log, reason, String(error), prep, { userAborted });
   } finally {
     phase = null;
   }
@@ -1409,13 +1907,32 @@ export function draftFallback(ctx: Any, log: Logger, after: string, message: str
   };
 }
 
-function fail(cfg: Config, ctx: Any, log: Logger, reason: string, message: string, prep?: Any): Any {
+function fail(
+  cfg: Config,
+  ctx: Any,
+  log: Logger,
+  reason: string,
+  message: string,
+  prep?: Any,
+  opts?: { userAborted?: boolean },
+): Any {
+  // A user cancel is not a failure and must never be "recovered" from. Running
+  // pi's native compaction here would compress the conversation the user just
+  // stopped compressing, and they would have no way to tell that happened.
+  if (opts?.userAborted) {
+    log("fail_cancelled_by_user", { reason, message });
+    if (ctx?.hasUI) ctx.ui.notify("vcc-plus: compaction cancelled", "info");
+    return { cancel: true };
+  }
   if (cfg.onFailure === "draft") {
     const fallback = draftFallback(ctx, log, "fallback_draft", `using the unchecked draft (${message})`, prep);
     if (fallback) return fallback;
   }
   if (cfg.fallbackToNative) {
     log("fallback_native", { message });
+    if (ctx?.hasUI) {
+      ctx.ui.notify(`vcc-plus: ${message} — falling back to pi's native compaction`, "warning");
+    }
     return undefined;
   }
   const manual = reason === "manual";
@@ -1457,15 +1974,23 @@ export const __internals = {
   compileDraft,
   toolsFromPayload,
   toolsRoundTripStatus,
+  unsupportedToolReason,
+  unsupportedApiReason,
+  wireToolCaveats,
   buildCheckFetch,
   verifyCheckPrefix,
   readWireBaseline,
   blockImageMessages,
   extractSection,
+  harvestThinking,
+  detectSectionHeader,
   runCheckLoop,
+  transientCheckFailure,
+  retryBackoffMs,
   fail,
   persistSnapshot,
   restoreSnapshot,
+  restoreSnapshotWhy,
   rebuildSnapshotFromSession,
   setToolProvider,
   keptTurnStats,

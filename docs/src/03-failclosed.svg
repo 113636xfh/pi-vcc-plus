@@ -1,42 +1,76 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 440" font-family="'Noto Sans CJK SC','Noto Sans',sans-serif">
-  <rect x="0" y="0" width="1280" height="440" fill="#ffffff"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 790" font-family="'Noto Sans CJK SC','Noto Sans',sans-serif">
+  <rect x="0" y="0" width="1280" height="790" fill="#ffffff"/>
 
-  <text x="640" y="52" font-size="26" font-weight="bold" fill="#1a202c" text-anchor="middle">失败处理：fail-closed</text>
-  <text x="640" y="86" font-size="15" fill="#5a6a80" text-anchor="middle">任何校验失败都取消整个压缩，绝不静默退回原生摘要</text>
+  <text x="640" y="52" font-size="26" font-weight="bold" fill="#1a202c" text-anchor="middle">失败处理：取消不重试，其余退回原生</text>
+  <text x="640" y="86" font-size="15" fill="#5a6a80" text-anchor="middle">默认：非人为取消的失败都交回 pi 原生压缩，并弹提示</text>
 
   <!-- trigger chip (gray) -->
-  <rect x="370" y="120" width="220" height="48" rx="10" fill="#f7f9fb" stroke="#94a3b8" stroke-width="2"/>
-  <text x="480" y="150" font-size="20" font-weight="bold" fill="#2d3748" text-anchor="middle">草稿就绪</text>
+  <rect x="270" y="116" width="300" height="44" rx="10" fill="#f7f9fb" stroke="#94a3b8" stroke-width="2"/>
+  <text x="420" y="145" font-size="20" font-weight="bold" fill="#2d3748" text-anchor="middle">检查失败</text>
 
-  <!-- arrow: chip bottom center -> gate top center -->
-  <line x1="480" y1="168" x2="480" y2="172" stroke="#718096" stroke-width="2.5"/>
-  <polygon points="472,172 488,172 480,186" fill="#718096"/>
+  <line x1="420" y1="160" x2="420" y2="166" stroke="#718096" stroke-width="2.5"/>
+  <polygon points="412,166 428,166 420,180" fill="#718096"/>
 
-  <!-- gate: all checks pass? (green) -->
-  <rect x="330" y="186" width="300" height="76" rx="10" fill="#eefaf3" stroke="#22a06b" stroke-width="2"/>
-  <text x="480" y="216" font-size="20" font-weight="bold" fill="#1e7a4c" text-anchor="middle">全部校验通过？</text>
-  <text x="480" y="244" font-size="15" fill="#5a6a80" text-anchor="middle">快照 · 工具 · 补丁 · 预算</text>
+  <!-- U: the user-cancel short circuit (gray, first thing checked) -->
+  <rect x="270" y="180" width="300" height="68" rx="10" fill="#f7f9fb" stroke="#94a3b8" stroke-width="2"/>
+  <text x="420" y="208" font-size="20" font-weight="bold" fill="#2d3748" text-anchor="middle">用户取消？</text>
+  <text x="420" y="230" font-size="15" fill="#5a6a80" text-anchor="middle">不重试，也不降级</text>
 
-  <!-- yes: gate bottom center -> success top center -->
-  <line x1="480" y1="262" x2="480" y2="278" stroke="#718096" stroke-width="2.5"/>
-  <polygon points="472,278 488,278 480,292" fill="#718096"/>
-  <text x="494" y="282" font-size="15" fill="#5a6a80">是</text>
+  <line x1="420" y1="248" x2="420" y2="286" stroke="#718096" stroke-width="2.5"/>
+  <polygon points="412,286 428,286 420,300" fill="#718096"/>
+  <text x="434" y="278" font-size="15" fill="#5a6a80">否</text>
 
-  <!-- success: finalize (green) -->
-  <rect x="330" y="292" width="300" height="64" rx="10" fill="#eefaf3" stroke="#22a06b" stroke-width="2"/>
-  <text x="480" y="320" font-size="20" font-weight="bold" fill="#1e7a4c" text-anchor="middle">定稿写入会话</text>
-  <text x="480" y="344" font-size="15" fill="#5a6a80" text-anchor="middle">摘要替换切点前的历史</text>
+  <line x1="570" y1="214" x2="856" y2="214" stroke="#718096" stroke-width="2.5"/>
+  <polygon points="856,206 856,222 870,214" fill="#718096"/>
+  <text x="582" y="206" font-size="15" fill="#5a6a80">是</text>
+  <rect x="870" y="180" width="290" height="68" rx="10" fill="#f7f9fb" stroke="#94a3b8" stroke-width="2"/>
+  <text x="1015" y="208" font-size="20" font-weight="bold" fill="#2d3748" text-anchor="middle">本次压缩取消</text>
+  <text x="1015" y="230" font-size="15" fill="#5a6a80" text-anchor="middle">上下文原样保留</text>
 
-  <!-- no rail: gate right-edge center -> fail left-edge center (red) -->
-  <line x1="630" y1="224" x2="836" y2="224" stroke="#d64545" stroke-width="2.5"/>
-  <polygon points="836,216 836,232 850,224" fill="#d64545"/>
-  <text x="642" y="216" font-size="15" fill="#d64545">否</text>
+  <!-- A: retry (orange = the model call) -->
+  <rect x="270" y="300" width="300" height="68" rx="10" fill="#fdeacc" stroke="#e8850c" stroke-width="2"/>
+  <text x="420" y="328" font-size="20" font-weight="bold" fill="#9a4d00" text-anchor="middle">是瞬时错误？重试</text>
+  <text x="420" y="350" font-size="15" fill="#5a6a80" text-anchor="middle">重发检查请求 · 默认 3 次</text>
 
-  <!-- fail-closed box (gray) -->
-  <rect x="850" y="192" width="260" height="64" rx="10" fill="#f7f9fb" stroke="#94a3b8" stroke-width="2"/>
-  <text x="980" y="220" font-size="20" font-weight="bold" fill="#2d3748" text-anchor="middle">fail-closed</text>
-  <text x="980" y="244" font-size="15" fill="#5a6a80" text-anchor="middle">取消压缩并通知</text>
+  <line x1="420" y1="368" x2="420" y2="390" stroke="#718096" stroke-width="2.5"/>
+  <polygon points="412,390 428,390 420,404" fill="#718096"/>
+  <text x="434" y="386" font-size="15" fill="#5a6a80">非瞬时 / 已耗尽</text>
 
-  <!-- caption -->
-  <text x="640" y="416" font-size="15" fill="#5a6a80" text-anchor="middle">会话原样保留：未校验的草稿永远不会成为定稿</text>
+  <!-- B: opt-in gate 1 -->
+  <rect x="270" y="404" width="300" height="68" rx="10" fill="#eefaf3" stroke="#22a06b" stroke-width="2"/>
+  <text x="420" y="432" font-size="20" font-weight="bold" fill="#1e7a4c" text-anchor="middle">onFailure = draft？</text>
+  <text x="420" y="454" font-size="15" fill="#5a6a80" text-anchor="middle">用未校验草稿直接定稿</text>
+
+  <line x1="420" y1="472" x2="420" y2="494" stroke="#718096" stroke-width="2.5"/>
+  <polygon points="412,494 428,494 420,508" fill="#718096"/>
+
+  <!-- C: opt-in gate 2 -->
+  <rect x="270" y="508" width="300" height="68" rx="10" fill="#eefaf3" stroke="#22a06b" stroke-width="2"/>
+  <text x="420" y="536" font-size="20" font-weight="bold" fill="#1e7a4c" text-anchor="middle">fallbackToNative？</text>
+  <text x="420" y="558" font-size="15" fill="#5a6a80" text-anchor="middle">false 才会报错或取消</text>
+
+  <line x1="420" y1="576" x2="420" y2="598" stroke="#718096" stroke-width="2.5"/>
+  <polygon points="412,598 428,598 420,612" fill="#718096"/>
+
+  <!-- result: only when the fallback is switched off (gray) -->
+  <rect x="270" y="612" width="300" height="68" rx="10" fill="#f7f9fb" stroke="#94a3b8" stroke-width="2"/>
+  <text x="420" y="640" font-size="20" font-weight="bold" fill="#2d3748" text-anchor="middle">报错或取消</text>
+  <text x="420" y="662" font-size="15" fill="#5a6a80" text-anchor="middle">手动 throw · 自动 cancel</text>
+
+  <!-- red rail: gates leave at their right-edge center, merge at x=710, exit at y=490 -->
+  <line x1="570" y1="438" x2="710" y2="438" stroke="#d64545" stroke-width="2.5"/>
+  <text x="582" y="430" font-size="15" fill="#d64545">否</text>
+  <line x1="570" y1="542" x2="710" y2="542" stroke="#d64545" stroke-width="2.5"/>
+  <text x="582" y="534" font-size="15" fill="#d64545">否</text>
+  <line x1="710" y1="438" x2="710" y2="542" stroke="#d64545" stroke-width="2.5"/>
+  <line x1="710" y1="490" x2="856" y2="490" stroke="#d64545" stroke-width="2.5"/>
+  <polygon points="856,482 856,498 870,490" fill="#d64545"/>
+
+  <!-- the default outcome (gray) -->
+  <rect x="870" y="446" width="290" height="88" rx="10" fill="#f7f9fb" stroke="#94a3b8" stroke-width="2"/>
+  <text x="1015" y="474" font-size="20" font-weight="bold" fill="#2d3748" text-anchor="middle">交回 pi 原生压缩</text>
+  <text x="1015" y="496" font-size="15" fill="#5a6a80" text-anchor="middle">并弹一条 warning 说明原因</text>
+  <text x="1015" y="518" font-size="15" fill="#5a6a80" text-anchor="middle">这次少了前缀复用，但会话不丢</text>
+
+  <text x="640" y="750" font-size="15" fill="#5a6a80" text-anchor="middle">只有用户主动取消才原地停下；其余失败一律降级，绝不把会话卡在装不下的上下文里</text>
 </svg>

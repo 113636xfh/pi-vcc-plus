@@ -16,8 +16,6 @@ import {
   DESC_VCC_ADD_LINES,
   DESC_VCC_ADD_REPLACE,
   DESC_VCC_ADD_SECTION,
-  DESC_VCC_DELETE,
-  DESC_VCC_DELETE_LINES,
   DESC_VCC_DONE,
   DESC_VCC_DRAFT,
 } from "./src/prompt";
@@ -43,18 +41,6 @@ export default async function piVccPlus(pi: ExtensionAPI): Promise<void> {
   ensureConfigFile();
   const cfg = loadConfig();
   if (!cfg.enabled) return;
-
-  pi.registerTool({
-    name: "vcc_delete",
-    label: "VCC Delete",
-    description: DESC_VCC_DELETE,
-    parameters: Type.Object({
-      lines: Type.Array(Type.Number(), { description: DESC_VCC_DELETE_LINES }),
-    }),
-    async execute(_toolCallId: string, params: unknown) {
-      return toolDelete(params);
-    },
-  });
 
   pi.registerTool({
     name: "vcc_add",

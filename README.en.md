@@ -21,9 +21,10 @@ pi-vcc-plus produces the summary differently:
    (session goal, files changed, commits, key decisions, environment, results, unfinished work, user
    preferences);
 2. **The model adds one supplement pass** — one instruction is appended to the end of the current
-   session; the model uses `vcc_delete` (remove lines by number) / `vcc_add` (append to a section) to
-   add what the draft is missing. That single response is the whole supplement, and the phase ends
-   right after it;
+   session; the model uses `vcc_add` to append to a named section (`"replace": true` rewrites it) and
+   adds what the draft is missing. That single response is the whole supplement, and the phase ends
+   right after it, closed with `vcc_done`. Sections the model never touches are kept verbatim by
+   construction;
 3. **Nothing before the tail changes** — the check request is a **strict continuation** of the last
    real request: same system prompt, same tool definitions, same history, with the instruction appended
    at the end. The prefix is byte-identical, so the server reuses its cache and only computes the few
@@ -40,8 +41,8 @@ to v0.8.0 via the `third_party/pi-vcc` git submodule at `303e89d`):
 | | pi-vcc (upstream) | pi-vcc-plus (this extension) |
 |---|---|---|
 | Draft generation | Mechanical extraction (structure, budget anchor, calibration) | Reused as-is; never copied or modified (reads its source directly) |
-| Model involvement | None (pure algorithm) | One supplement pass: `vcc_delete` / `vcc_add` (`vcc_draft` on demand, `vcc_done` optional) |
-| Prefix stability | Not handled | Reuses the last request's snapshot + byte-level verification + no silent fallback to native |
+| Model involvement | None (pure algorithm) | One supplement pass: `vcc_add` (`"replace":true` rewrites a section), `vcc_draft` on demand, `vcc_done` to close |
+| Prefix stability | Not handled | Reuses the last request's snapshot + byte-level verification; falls back to native (with a notice) only on failure |
 | History recall | `vcc_recall` (reads the raw JSONL) | Registered by default (rejected during the supplement pass) |
 
 The loader only reads upstream's **published source**, never modifies it. Updating it:
@@ -71,9 +72,8 @@ difference is where the summary comes from:
    - the **raw material** the model reads, dropped again when finalizing.
 2. **Let the model add one supplement pass**: the last real request verbatim plus one tail instruction
    is sent to the model. The instruction carries the draft with **line numbers** (the sections region is
-   numbered so lines can be removed by number; the raw-material region is unnumbered and read-only) and
-   says which kinds of information to add. The model sends `vcc_delete` / `vcc_add` edits; stopping ends
-   the phase - no separate "done" call required. If that round calls no tool at all, the extension asks
+   numbered; the raw-material region is unnumbered, read-only, and dropped at finalize) and
+   says which kinds of information to add. The model sends `vcc_add` edits and closes with `vcc_done`. If that round calls no tool at all, the extension asks
    once more with a nudge instead of finalizing the untouched draft; if the response hits the output
    cap, the edits that parsed are still applied instead of discarding the round.
 3. **Finalize**: the raw material and separator markers are dropped, leaving only the section body
@@ -122,6 +122,33 @@ chars, and the model changed 10 of them), so there is no "write the summary from
 How this was measured, per-sample data, the prefill rate distribution, the thinking/summary split and
 the prompt-version comparison: [`docs/vcc-vs-native-notes.md`](docs/vcc-vs-native-notes.md).
 
+## Supported backends
+
+Everything here rests on reusing the previous request's prefix **byte for byte**, which is done by
+rewriting the request body (raw wire tools written back in, captured request-level parameters
+replayed). Rewriting needs an adapter that accepts a custom `fetch` and whose request body is JSON we
+can parse.
+
+| pi adapter | Supported |
+|---|---|
+| `openai-completions` (standard OpenAI `/v1/chat/completions`) | Yes — the primary target. Local servers (llama.cpp server, vLLM, SGLang, FastLLM, TGI, Ollama) all speak it |
+| `anthropic-messages` | Yes — its `input_schema` is reconstructed exactly |
+| `google-generative-ai` / `google-vertex` / `bedrock-converse-stream` / custom adapters | No |
+
+Unsupported backends do **not** degrade silently. A check request whose prefix quietly diverged costs
+a full prefill while looking like nothing but a cache miss, so the extension fails closed and names
+the actual cause — Google's `functionDeclarations`, Bedrock's `toolSpec`, a grammar-constrained
+tool, an unrecognized shape — instead of saying "unknown shape".
+
+`strict` and `defer_loading` are deliberately *not* refusal reasons. pi-ai puts `strict` on every
+OpenAI-style tool unless the model's `compat.supportsStrictMode` is `false`, which is the default,
+so treating it as unreconstructable made the extension refuse to compact on essentially every
+OpenAI-compatible backend. They are safe because the outgoing `tools` is replaced wholesale with the
+captured raw wire tools: the reconstruction only has to hand the adapter a usable definition (name +
+JSON schema). The fields that survive *only* through that write-back are logged as
+`round.toolsOnlyByWriteback` — and if the write-back ever fails to apply, `checkPrefix` reports
+`identical=false` / `fetchCalled=false` rather than the guard guessing in advance.
+
 ## Install
 
 ```powershell
@@ -160,15 +187,18 @@ Upstream pi-vcc is resolved in this order (always its **published source**; we n
     "emptyRetries": 1,
     "maxConsecutiveFails": 4,
     "maxDraftReads": 3,
+    "maxRequestRetries": 3,
     "callTimeoutMs": 0,
+    "thinkingCapChars": 8000,
     "requireDone": false
   },
   "onFailure": "auto",
-  "fallbackToNative": false,
+  "fallbackToNative": true,
   "upstreamRecallTool": true,
   "alignCheckParams": true,
   "onContextOverflow": "trim",
   "debugLog": true,
+  "debugTrace": false,
   "systemBlock": "<pi-vcc-plus>…</pi-vcc-plus>"
 }
 ```
@@ -182,16 +212,41 @@ Upstream pi-vcc is resolved in this order (always its **published source**; we n
     one round; raising it restores "keep editing until the model explicitly finishes".
   - `emptyRetries` (default 1): if a round calls no tool at all, ask once more with a nudge (otherwise
     the untouched draft would be finalized as the summary).
-  - `maxConsecutiveFails` (default 4): how many rejected edits in a row (a bad line number, say) abort
-    this compaction.
+  - `maxConsecutiveFails` (default 4): how many rejected edits in a row abort this compaction.
   - `maxDraftReads` (default 3): how often the model may read the full draft.
+  - `maxRequestRetries` (default 3): how many times a check request that failed with a **transient**
+    error (dropped connection, timeout, 429, 5xx) is resent, backing off 1s / 2s / 4s with jitter.
+    It is not `maxRounds`: a resend is not a round, and `rounds` still counts only the responses the
+    model actually produced. Only errors classified transient are resent; 400 / 401 / 413, a context
+    overflow, and any unrecognised message still fail closed on the first attempt.
   - `callTimeoutMs` (default 0): per-call time limit; 0 = unlimited.
+  - `thinkingCapChars` (default 8000): a hard cap on the characters of thinking the model may stream
+    during a supplement round. When it is hit we abort the stream (force-truncate) and fold the
+    `[Section]` blocks the model already drafted in its thinking into the draft. 0 = no cap.
+    This is a **provider-independent, stream-level abort** — one standard for every model; it does not
+    lower the thinking level or configure anything per-model.
+    Why: `alignCheckParams` makes the check request inherit the session's thinking setting, and a fast
+    reasoning model can spend minutes drafting the whole summary in its thinking (measured: 49,370
+    chars / 1,101 s that committed 0.4 k chars). We cannot stop the model mid-thinking and let it
+    continue, but we can cut the stream at the cap and keep what it thought — so the under-committed
+    sections are recovered instead of lost to an 18-minute wait. Raise it to let heavy over-thinkers
+    reach their final draft before the cut; lower it for a tighter time bound.
+    The check prompt tells the model about the cap (exceeding it aborts the stream and loses every
+    tool call it had not sent yet) and asks it to write each section's final bullet lines under a
+    `[Section]` header in its thinking before committing — those lines are still recovered if the
+    stream is cut. Harvesting recognizes numbered or annotated section headers
+    (`1. [Results]:`, `- [Key Decisions] — …:`) and skips plan entries (`[X] (add specifics)`) and
+    self-deliberation; finalization drops the same residue as well as half-lines cut off with
+    unbalanced parentheses — the draft chains the previous summary verbatim, so residue that one
+    round leaked must not be allowed to persist.
   - `requireDone` (default false): when true, the model must call `vcc_done` explicitly; a plain-text
     finish counts as a failure.
-- `onFailure`: what to do on failure - `auto` (a manual `/compact` errors out; an automatic compaction
-  cancels and notifies), `cancel`, `throw`, `draft` (finalize with the unverified draft).
-- `fallbackToNative`: `false` = **no silent fallback** to pi's native summarizer. A silent fallback would
-  defeat the whole point (prefix reuse) without the user noticing, so it is off by default.
+- `onFailure`: what to do on failure - `auto` (default), `cancel`, `throw`, `draft` (finalize with the
+  unverified draft). Only reached when `fallbackToNative` is false.
+- `fallbackToNative`: `true` (default) = every failure **except a user cancel** returns `undefined` and
+  lets pi compact natively, with a warning naming the cause. One flaky gateway should cost that
+  compaction its prefix reuse, not the conversation. `false` = fail closed instead (a manual `/compact`
+  throws, an automatic one cancels). See the next section.
 - `upstreamRecallTool`: register upstream's read-only `vcc_recall` tool (on by default; it is rejected
   during the supplement pass).
 - `alignCheckParams`: let the check request reuse the previous request's request-level parameters. On by
@@ -206,9 +261,40 @@ Upstream pi-vcc is resolved in this order (always its **published source**; we n
   `onFailure`). pi's context estimate is conservative for Chinese text, so compaction can trigger a
   little late; this decides what happens when it is just barely too big.
 - `debugLog`: write the session log (below).
+- `debugTrace`: the debug switch. `false` (default) leaves the box a 24-line preview and counts
+  thinking without showing it. `true` makes the expanded box a full transcript — the whole thinking
+  stream, untruncated tool arguments, the draft itself — and additionally writes
+  `<session ID>.trace.md` (the terminal scrolls; the file does not). Turn it back off when done.
 - `systemBlock`: the block injected into the system prompt; changing it changes the prefix, so `/reload`.
 
 The config is read once, when the extension loads; run `/reload` after editing `config.json`.
+
+## Does a failure fall back to native compaction?
+
+**Yes — unless you cancelled it yourself.** The decision is made top to bottom; the first match wins:
+
+![On failure](docs/images/03-failclosed-en.png)
+
+| # | Condition | Outcome | Default? |
+| --- | --- | --- | --- |
+| 0 | **The user cancelled** (Esc) | This compaction is cancelled, context intact. **No retry, no fallback** | — |
+| 1 | The error is classified **transient** (dropped connection / timeout / 429 / 5xx) | Resend in place, backing off 1s/2s/4s, up to `maxRequestRetries` | ✅ on |
+| 2 | `onFailure: "draft"` | Finalize with the **unverified mechanical draft** | ❌ |
+| 3 | `fallbackToNative: true` | Return `undefined` — **pi's own compaction takes over** — plus a warning | ✅ default |
+| 4 | `fallbackToNative: false` + `onFailure: "auto"` | manual `/compact` → **throws**; automatic compaction → **cancels** | ❌ |
+| 4 | `fallbackToNative: false` + `"cancel"` / `"throw"` | pinned to cancel / throw respectively | ❌ |
+
+Three things worth being precise about:
+
+- **A user cancel is checked first, ahead of every degradation.** You pressed Esc, so the extension stops:
+  no retry, and no running pi's compaction either — that would compress the very conversation you just
+  stopped, without your ever knowing it happened.
+- **Step 3 notifies.** The message carries the cause
+  (`vcc-plus: … — falling back to pi's native compaction`), and the log gets a `fallback_native` event.
+  This is not a silent downgrade: that summary genuinely skipped the check pass and lost prefix reuse.
+- **To get fail-closed instead**, set `fallbackToNative: false`. A manual `/compact` will then throw:
+  the extension would rather let one compaction fail than let an unverified summary become the record
+  without saying so.
 
 ## Logs and self-check
 

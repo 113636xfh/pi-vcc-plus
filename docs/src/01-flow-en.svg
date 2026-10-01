@@ -16,8 +16,8 @@
 
   <!-- node 3: model patch loop (orange = core LLM step) -->
   <rect x="680" y="140" width="240" height="88" rx="10" fill="#fdeacc" stroke="#e8850c" stroke-width="2"/>
-  <text x="800" y="170" font-size="20" font-weight="bold" fill="#9a4d00" text-anchor="middle">model patch loop</text>
-  <text x="800" y="198" font-size="15" fill="#5a6a80" text-anchor="middle">vcc_delete / vcc_add · vcc_done</text>
+  <text x="800" y="170" font-size="20" font-weight="bold" fill="#9a4d00" text-anchor="middle">model supplement</text>
+  <text x="800" y="198" font-size="15" fill="#5a6a80" text-anchor="middle">vcc_add · vcc_draft · vcc_done</text>
 
   <!-- node 4: finalize (blue) -->
   <rect x="1000" y="140" width="240" height="88" rx="10" fill="#eef3fb" stroke="#3b82c4" stroke-width="2"/>
@@ -35,5 +35,5 @@
   <!-- loop return: node 3 bottom center -> node 2 bottom center (dashed) -->
   <path d="M 800,228 L 800,300 L 480,300 L 480,242" fill="none" stroke="#94a3b8" stroke-width="2" stroke-dasharray="7 5"/>
   <polygon points="472,242 488,242 480,228" fill="#94a3b8"/>
-  <text x="640" y="330" font-size="15" fill="#5a6a80" text-anchor="middle">one more round until vcc_done or a guard trips</text>
+  <text x="640" y="330" font-size="15" fill="#5a6a80" text-anchor="middle">single round by default: vcc_done ends the pass; maxRounds &gt; 1 loops</text>
 </svg>

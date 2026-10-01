@@ -19,8 +19,22 @@ export function buildTailInstruction(args: {
   keptTurns?: KeptTurns;
   /** Focus instructions from a manual `/compact <instructions>` (manual path only). */
   customInstructions?: string;
+  /** Hard cap on the model's thinking, in characters (0 or undefined = no cap). */
+  thinkingCapChars?: number;
 }): string {
   const { draft, capTokens, reserveTokens, modelMaxTokens, draftTokens, customInstructions } = args;
+  const thinkingCap = args.thinkingCapChars ?? 0;
+  const thinkingBudget = thinkingCap > 0
+    ? `[Thinking budget] Your thinking is hard-capped at ${thinkingCap} characters: when it
+exceeds the cap, this stream is aborted immediately and everything you had not yet
+sent is lost — including the vcc_add / vcc_done calls you were about to make. So
+keep your thinking compact and finish it well under the cap: scan the transcript,
+settle the missing facts, and write each section's final bullet lines out under a
+"[Section]" header in the thinking (those lines are still recovered if you are cut
+off), then commit them with vcc_add and call vcc_done.
+
+`
+    : "";
   const scope = args.keptTurns;
   const scopeLine =
     scope && scope.keepRecentTokens > 0
@@ -51,13 +65,24 @@ commands, IDs and numbers as they are.
 
 [Task] Add what the draft misses and matters: user constraints, decisions with their
 reasons, exact environment details, unfinished work with its next step, measured results
-and failures. Stay under ${capTokens} tokens (the draft is ~${draftTokens}).
-${scopeLine}
+and failures. Stay under ${capTokens} tokens (the draft is ~${draftTokens}); length is not
+the goal, coverage is.
 
-[Edits] In this phase only vcc_delete / vcc_add / vcc_draft / vcc_done work; any other tool
-is rejected. vcc_delete removes numbered lines; vcc_add appends lines to a named section
-("replace":true rewrites that section first). You do not need vcc_done: what you send here
-is applied as-is.${customInstructions ? `\n\n[User instructions for this summary] ${customInstructions}` : ""}`
+The draft is mechanical: it inventories files, commands and turns, but it cannot know why
+a choice was made, what was ruled out, what is still open, or what you were asked to do.
+Check those four against the transcript before deciding the draft is already complete:
+  - what was asked of you, and any constraint or correction since
+  - a decision together with its reason and the option it beat
+  - what is unfinished, and the next concrete step
+  - measured numbers, and failures quoted with their actual error text
+If the draft already carries all four, adding nothing is the right answer.
+${thinkingBudget}${scopeLine}
+
+[Edits] In this phase only vcc_add / vcc_draft / vcc_done work; any other tool
+is rejected. vcc_add appends lines to a named section; ("replace":true rewrites that
+section first, which is also how you drop a line the draft already has — there is no
+per-line delete). Sections you do not touch are kept exactly as they are. vcc_draft re-reads
+the current draft. Finish with vcc_done once you have sent everything.${customInstructions ? `\n\n[User instructions for this summary] ${customInstructions}` : ""}`
 }
 
 
@@ -169,12 +194,13 @@ export function renderForModel(draft: string): string {
   if (transcript === null) return numbered;
   return `${numbered}\n\n${TRANSCRIPT_MARKER}\n\n${transcript}`;
 }
-export const DESC_VCC_DELETE = `Remove lines from the compaction draft by line number. The draft's sections region is numbered (NNN | text); the transcript block below the marker is not numbered and cannot be deleted. Send all the line numbers of one edit in a single call. Only usable during the compaction check.`;
-export const DESC_VCC_DELETE_LINES =
-  "Line numbers of the draft's sections region, as shown in the numbered draft (one number per line to remove).";
+export const DESC_VCC_DELETE = `Removed. To change a line the draft already has, call vcc_add with "replace": true on that section and resend the section without the line.`;
+export const ERR_VCC_DELETE_REDIRECT = `vcc_delete no longer exists — line-number deletes were dropped after measuring a 26% failure rate on it (models miscount the numbered region; 12 of 46 calls failed across 71 compactions).
+
+To change what the draft already says, use vcc_add with "replace": true on that section: it clears the section and you resend the lines you want to keep. Untouched sections are never rewritten, so this costs nothing on the sections you are not changing.`;
 export const DESC_VCC_ADD = `Add lines to the end of a section of the compaction draft, named by section instead of by locating text. "replace": true drops that section's current bullets first, which rewrites the section in one call. Only usable during the compaction check.`;
 export const DESC_VCC_ADD_SECTION = 'Section name, e.g. "Results" (aliases such as [Outstanding] resolve to their canonical section; a missing one is created).';
 export const DESC_VCC_ADD_LINES = "Lines to append, one bullet per line (e.g. '- cacheRead=37632 (hit)').";
 export const DESC_VCC_ADD_REPLACE = "true = clear that section's current bullets first (a full rewrite of the section).";
 export const DESC_VCC_DRAFT = `Show the current compaction draft. Only usable during the compaction check; calls in normal turns are rejected. Use it only when the diff receipt is not enough to judge the draft state.`;
-export const DESC_VCC_DONE = `Finish revising the compaction draft. Only usable during the compaction check; calls in normal turns are rejected.`;
+export const DESC_VCC_DONE = `Finish revising the compaction draft. Only usable during the compaction check; calls in normal turns are rejected. End your pass with this once you have sent everything — it is the signal that the supplement pass is complete.`;

@@ -28,7 +28,20 @@ describe("buildTailInstruction", () => {
 
   test("keeps the prompt short", () => {
     const text = buildTailInstruction({ ...base });
-    expect(text.length).toBeLessThan(2500);
+    expect(text.length).toBeLessThan(2800);
+  });
+
+  test("tells the model its thinking is hard-capped and cut (cap on)", () => {
+    const text = buildTailInstruction({ ...base, thinkingCapChars: 8000 });
+    expect(text).toContain("Your thinking is hard-capped at 8000 characters");
+    expect(text).toContain("stream is aborted");
+    expect(text).toContain("vcc_add / vcc_done");
+    expect(text).toContain("well under the cap");
+  });
+
+  test("omits the thinking-budget block when there is no cap", () => {
+    const text = buildTailInstruction({ ...base, thinkingCapChars: 0 });
+    expect(text).not.toContain("hard-capped");
   });
 
   test("wraps the numbered draft in <draft> tags", () => {
@@ -81,22 +94,65 @@ describe("buildTailInstruction", () => {
     expect(text).toContain("next step: X");
   });
 
+  test("names what the mechanical draft structurally cannot carry", () => {
+    // Measured on a 102-message session: the check round answered with 153
+    // output / 0 reasoning tokens and left a 535-char summary while 92% of the
+    // budget sat unused. The prompt gave an upper bound and no reason to look
+    // harder, so the cheapest compliant answer was three bullets. These four
+    // checks are what make "nothing to add" an informed decision instead.
+    const text = buildTailInstruction({ ...base });
+    expect(text).toContain("The draft is mechanical");
+    expect(text).toContain("it inventories files, commands and turns");
+    expect(text).toContain("why\na choice was made");
+    expect(text).toContain("what was ruled out");
+    expect(text).toContain("what is still open");
+    expect(text).toContain("what you were asked to do");
+    expect(text).toContain("Check those four against the transcript");
+  });
+
+  test("lets the model decide that nothing needs adding", () => {
+    const text = buildTailInstruction({ ...base });
+    expect(text).toContain("adding nothing is the right answer");
+  });
+
+  test("asks for coverage rather than a length target", () => {
+    // A hard character floor would pad sparse sessions; the budget stays an
+    // upper bound only.
+    const text = buildTailInstruction({ ...base });
+    expect(text).toContain("length is not\nthe goal, coverage is");
+    expect(text).not.toMatch(/at least \d+ (tokens|chars|words)/);
+    expect(text).not.toMatch(/no fewer than \d+/);
+  });
+
   test("falls back to wording without numbers when the settings are unavailable", () => {
     const text = buildTailInstruction({ ...base, keptTurns: { keepRecentTokens: 0, messages: 0, tokens: 0 } });
     expect(text).toContain("pi keeps the recent turns at the end of this conversation verbatim right after this");
     expect(text).not.toContain("keepRecentTokens = 0");
   });
 
-  test("documents the two edit tools, the closed tool set, and that vcc_done is optional", () => {
+  test("documents the three remaining tools and the closed tool set", () => {
+    // vcc_delete was dropped: 26% of its calls failed across 71 compactions
+    // (models miscount the numbered region), and vcc_add replace:true covers
+    // the only thing it did. What must survive is the redirect — 49% of
+    // compactions used to call it, so a bare rejection would burn calls.
     const text = buildTailInstruction({ ...base });
     expect(text).toContain("[Edits]");
-    expect(text).toContain("only vcc_delete / vcc_add / vcc_draft / vcc_done work");
+    expect(text).toContain("only vcc_add / vcc_draft / vcc_done work");
     expect(text).toContain("any other tool\nis rejected");
-    expect(text).toContain("vcc_delete removes numbered lines");
-    expect(text).toContain("vcc_add appends lines to a named section");
-    expect(text).toContain('"replace":true rewrites that section first');
-    expect(text).toContain("You do not need vcc_done");
-    expect(text).toContain("is applied as-is");
+    expect(text).not.toContain("vcc_delete");
+    expect(text).toContain("there is no\nper-line delete");
+    expect(text).toContain("Sections you do not touch are kept exactly as they are");
+    expect(text).toContain("vcc_draft re-reads");
+    expect(text).toContain("Finish with vcc_done once you have sent everything");
+  });
+
+  test("asks for vcc_done instead of calling it optional", () => {
+    // Measured over 71 compactions: 51% ended their pass with vcc_done and
+    // 36 of 36 such calls were the final one. The prompt used to say the model
+    // did not need it, which contradicted what every model actually did.
+    const text = buildTailInstruction({ ...base });
+    expect(text).not.toContain("You do not need vcc_done");
+    expect(text).not.toContain("is applied as-is");
   });
 
   test("custom instructions appear only when provided", () => {

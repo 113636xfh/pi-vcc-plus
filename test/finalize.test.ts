@@ -105,6 +105,44 @@ describe("finalizeSummary", () => {
     expect(report.dedupedBullets).toBe(1);
   });
 
+  test("near-duplicate bullets: the richer one subsumes the shorter", () => {
+    const { text, report } = finalizeSummary(
+      `[Results]\n- bun test: 213 pass\n- bun test: 213 pass, 0 fail, 13 files\n- tsc clean`,
+    );
+    expect(text).toBe("[Results]\n- bun test: 213 pass, 0 fail, 13 files\n- tsc clean");
+    expect(report.dedupedBullets).toBe(1);
+  });
+
+  test("drops planning residue inherited from a previous summary", () => {
+    const { text, report } = finalizeSummary(
+      [
+        "[Files And Changes]",
+        "- src/engine.ts modified",
+        "[Commits] — probably no commits. Let me check — I don't recall any git commits.",
+        "- Main line: improve compaction quality (drafts well in thinking",
+        "- code bullet kept: grep `/(` for unbalanced",
+        "- date kept: [2026-09-30] deploy",
+      ].join("\n"),
+    );
+    expect(text).toBe("[Files And Changes]\n- src/engine.ts modified\n- code bullet kept: grep `/(` for unbalanced\n- date kept: [2026-09-30] deploy");
+    expect(report.dedupedBullets).toBe(0);
+  });
+
+  test("a later superset bullet replaces the earlier shorter one in place", () => {
+    const { text } = finalizeSummary(`[Environment]\n- repo path\n- repo path D:/01-R&D/Project-pi-vcc-plus`);
+    expect(text).toBe("[Environment]\n- repo path D:/01-R&D/Project-pi-vcc-plus");
+  });
+
+  test("case/punctuation variants of the same bullet dedupe, unrelated ones stay", () => {
+    const { text, report } = finalizeSummary(
+      `[Key Decisions]\n- VCC_DELETE removed from registry.\n- vcc_delete removed from registry; engine returns ERR_VCC_DELETE_REDIRECT\n- unrelated decision`,
+    );
+    expect(text).toBe(
+      "[Key Decisions]\n- vcc_delete removed from registry; engine returns ERR_VCC_DELETE_REDIRECT\n- unrelated decision",
+    );
+    expect(report.dedupedBullets).toBe(1);
+  });
+
   test("keeps section bullets even when a later transcript block follows them", () => {
     const { text } = finalizeSummary(
       `[Key Decisions]\n- 对齐参数默认开启\n\n[assistant]\n* bash "git log" (#12)\n\n- 这条是转录里的后续行`,
