@@ -1,3 +1,5 @@
+**⚠️ This is an experimental project and is currently unstable.**
+
 # pi-vcc-plus
 
 > Makes pi's context compaction stop being "one more summarization request": a **mechanical draft plus
